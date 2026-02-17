@@ -461,13 +461,93 @@ contract PayoutsContractTest is Test {
 
         vm.prank(investor1);
         payouts.claimPayout(distributionId1);
-        // Investor1: (1000 * 3000) / 3000 = 1000
+        // Investor1: (1000 / 3000) * 3000 = 1000
         assertEq(payoutToken.balanceOf(investor1), balance1Before + 1000 * 10 ** 18);
 
         vm.prank(investor2);
         payouts.claimPayout(distributionId1);
-        // Investor2: (2000 * 2000) / 3000 = 1333.33... (remaining after investor1)
-        assertEq(payoutToken.balanceOf(investor2), balance2Before + 1333333333333333333333);
+        // Investor2: (2000 / 3000) * 3000 = 2000 (fixed: proportional regardless of claim order)
+        assertEq(payoutToken.balanceOf(investor2), balance2Before + 2000 * 10 ** 18);
+    }
+
+    /**
+     * @notice Regression test for shrinking-pool bug: payouts must use fixed total allocation,
+     *         not decreasing pool. With the bug, later claimants would be underpaid.
+     *         Example: 50/50 split, 1000 total -> both must get 500 regardless of claim order.
+     */
+    function test_Regression_ProportionalPayout_OrderIndependent() public {
+        uint256 totalPayout = 1000 * 10 ** 18;   // 1000 USDC allocated
+        uint256 balanceA = 50 * 10 ** 18;        // 50%
+        uint256 balanceB = 50 * 10 ** 18;        // 50%
+        uint256 expectedEach = 500 * 10 ** 18;   // (50/100) * 1000 = 500
+
+        // Setup distribution 1: A claims first, B claims second
+        vm.prank(snapshotRole);
+        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalances(
+            distributionId1,
+            _arr(investor1, investor2),
+            _arr(balanceA, balanceB),
+            _arr(PayoutsContract.PayoutMethod.Claim, PayoutsContract.PayoutMethod.Claim)
+        );
+        payoutToken.mint(admin, totalPayout);
+        payoutToken.approve(address(payouts), totalPayout);
+        vm.prank(admin);
+        payouts.fundPayoutToken(distributionId1, totalPayout);
+
+        vm.prank(investor1);
+        payouts.claimPayout(distributionId1);
+        vm.prank(investor2);
+        payouts.claimPayout(distributionId1);
+
+        assertEq(payoutToken.balanceOf(investor1), expectedEach, "A must get 500");
+        assertEq(payoutToken.balanceOf(investor2), expectedEach, "B must get 500 when claiming second (bug would give 250)");
+
+        // Setup distribution 2: B claims first, A claims second (reverse order)
+        vm.roll(block.number + 1);
+        vm.prank(snapshotRole);
+        distributionId2 = payouts.createDistribution(block.number, address(payoutToken));
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalances(
+            distributionId2,
+            _arr(investor1, investor2),
+            _arr(balanceA, balanceB),
+            _arr(PayoutsContract.PayoutMethod.Claim, PayoutsContract.PayoutMethod.Claim)
+        );
+        payoutToken.mint(admin, totalPayout);
+        payoutToken.approve(address(payouts), totalPayout);
+        vm.prank(admin);
+        payouts.fundPayoutToken(distributionId2, totalPayout);
+
+        vm.prank(investor2);
+        payouts.claimPayout(distributionId2);
+        vm.prank(investor1);
+        payouts.claimPayout(distributionId2);
+
+        assertEq(payoutToken.balanceOf(investor1), expectedEach * 2, "A must get 500 when claiming second");
+        assertEq(payoutToken.balanceOf(investor2), expectedEach * 2, "B must get 500 when claiming first");
+    }
+
+    function _arr(address a, address b) internal pure returns (address[] memory) {
+        address[] memory arr = new address[](2);
+        arr[0] = a;
+        arr[1] = b;
+        return arr;
+    }
+
+    function _arr(uint256 a, uint256 b) internal pure returns (uint256[] memory) {
+        uint256[] memory arr = new uint256[](2);
+        arr[0] = a;
+        arr[1] = b;
+        return arr;
+    }
+
+    function _arr(PayoutsContract.PayoutMethod a, PayoutsContract.PayoutMethod b) internal pure returns (PayoutsContract.PayoutMethod[] memory) {
+        PayoutsContract.PayoutMethod[] memory arr = new PayoutsContract.PayoutMethod[](2);
+        arr[0] = a;
+        arr[1] = b;
+        return arr;
     }
 
     function test_ClaimPayout_InvalidConditions() public {
@@ -575,10 +655,10 @@ contract PayoutsContractTest is Test {
         vm.prank(admin);
         payouts.batchDistributeAutomatic(distributionId1, investors);
 
-        // Investor1: (1000 * 3000) / 3000 = 1000
+        // Investor1: (1000 / 3000) * 3000 = 1000
         assertEq(payoutToken.balanceOf(investor1), balance1Before + 1000 * 10 ** 18);
-        // Investor2: (2000 * 2000) / 3000 = 1333.33... (remaining after investor1)
-        assertEq(payoutToken.balanceOf(investor2), balance2Before + 1333333333333333333333);
+        // Investor2: (2000 / 3000) * 3000 = 2000 (fixed: proportional regardless of order)
+        assertEq(payoutToken.balanceOf(investor2), balance2Before + 2000 * 10 ** 18);
         assertTrue(payouts.paidOut(distributionId1, investor1));
         assertTrue(payouts.paidOut(distributionId1, investor2));
     }
@@ -1047,7 +1127,8 @@ contract PayoutsContractTest is Test {
         assertTrue(payouts.paidOut(distributionId1, investor1));
         
         PayoutsContract.Distribution memory dist = payouts.getDistribution(distributionId1);
-        assertEq(dist.payoutTokenAmount, 0); // Remaining after claim
+        assertEq(dist.payoutTokenAmount, fundingAmount); // Total allocated (fixed)
+        assertEq(dist.payoutTokenClaimed, fundingAmount); // All claimed
     }
 
     function test_FullFlow_AllMethods() public {
@@ -1085,7 +1166,7 @@ contract PayoutsContractTest is Test {
         
         vm.prank(investor1);
         payouts.claimPayout(distributionId1);
-        // Investor1: (1000 * 3000) / 6000 = 500
+        // Investor1: (1000 / 6000) * 3000 = 500
         assertEq(payoutToken.balanceOf(investor1), balance1Before + 500 * 10 ** 18);
 
         // Automatic
@@ -1093,19 +1174,16 @@ contract PayoutsContractTest is Test {
         autoInvestors[0] = investor2;
         vm.prank(admin);
         payouts.batchDistributeAutomatic(distributionId1, autoInvestors);
-        // Investor2: (2000 * 2500) / 6000 = 833.33... (remaining after investor1)
-        assertEq(payoutToken.balanceOf(investor2), balance2Before + 833333333333333333333);
+        // Investor2: (2000 / 6000) * 3000 = 1000 (fixed: uses total allocation, not shrinking pool)
+        assertEq(payoutToken.balanceOf(investor2), balance2Before + 1000 * 10 ** 18);
 
         // Bank (off-chain, just mark as paid)
         vm.prank(admin);
         payouts.markPayoutAsPaid(distributionId1, investor3);
         assertTrue(payouts.paidOut(distributionId1, investor3));
         
-        // Calculate remaining: Investor1 got 500, Investor2 got 833 (due to integer division)
-        // Total distributed: 500 + 833 = 1333
-        // Remaining: 3000 - 1333 = 1667
-        // Due to integer division rounding, actual remaining may vary slightly
-        // Expected: 1667000000000000000000 (1667 tokens), but actual is 1666666666666666666667
-        assertEq(payoutToken.balanceOf(address(payouts)), 1666666666666666666667);
+        // Investor1 got 500, Investor2 got 1000. Total on-chain distributed: 1500
+        // Remaining in contract: 3000 - 1500 = 1500 (Bank investor's share stays, paid off-chain)
+        assertEq(payoutToken.balanceOf(address(payouts)), 1500 * 10 ** 18);
     }
 }

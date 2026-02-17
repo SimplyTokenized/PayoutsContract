@@ -45,12 +45,13 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 snapshotBlockNumber;
         uint256 totalSnapshotBalance;
         address payoutToken; // Single payout token for this distribution (address(0) for ETH)
-        uint256 payoutTokenAmount; // Total payout amount allocated
+        uint256 payoutTokenAmount; // Total payout amount allocated (fixed, never decreased)
         uint256 claimBalance; // Total snapshot balance for Claim method investors
         uint256 automaticBalance; // Total snapshot balance for Automatic method investors
         uint256 bankBalance; // Total snapshot balance for Bank method investors
         bool initialized;
         uint256 investorCount;
+        uint256 payoutTokenClaimed; // Total amount claimed so far (increases as payouts execute)
     }
     
     // Distribution data: distributionId => Distribution
@@ -155,7 +156,8 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             automaticBalance: 0,
             bankBalance: 0,
             initialized: true,
-            investorCount: 0
+            investorCount: 0,
+            payoutTokenClaimed: 0
         });
         
         emit DistributionCreated(distributionId, _blockNumber, _payoutToken);
@@ -419,11 +421,12 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
 
         uint256 payoutAmount = _calculatePayoutAmount(distributionId, msg.sender);
         require(payoutAmount > 0, "PayoutsContract: no payout available");
-        require(dist.payoutTokenAmount >= payoutAmount, "PayoutsContract: insufficient funds");
+        require(dist.payoutTokenAmount - dist.payoutTokenClaimed >= payoutAmount, "PayoutsContract: insufficient funds");
 
         // Mark as paid out before transfer (reentrancy protection)
         paidOut[distributionId][msg.sender] = true;
-        dist.payoutTokenAmount -= payoutAmount;
+        payoutAmounts[distributionId][msg.sender] = payoutAmount;
+        dist.payoutTokenClaimed += payoutAmount;
 
         // Transfer payout
         address payoutToken = dist.payoutToken;
@@ -444,9 +447,12 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
      * @param distributionId The distribution ID
      * @param investor Investor address
      * @return payoutAmount Amount the investor should receive
+     * @notice Uses totalPayoutAllocated (payoutTokenAmount) - never the remaining pool - for proportional fairness
+     * @notice Pure calculation - no state mutation
      */
     function _calculatePayoutAmount(uint256 distributionId, address investor) 
         internal 
+        view 
         returns (uint256 payoutAmount) 
     {
         Distribution storage dist = distributions[distributionId];
@@ -456,13 +462,11 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         }
 
         uint256 investorSnapshotBalance = snapshotBalances[distributionId][investor];
-        uint256 totalPayoutAmount = dist.payoutTokenAmount;
+        // Use total allocation (payoutTokenAmount) - fixed reference, never decreases
+        uint256 totalPayoutAllocated = dist.payoutTokenAmount;
 
         // Calculate proportional payout: (investor_balance / total_snapshot_balance) * total_payout
-        payoutAmount = (investorSnapshotBalance * totalPayoutAmount) / dist.totalSnapshotBalance;
-        
-        // Cache the calculated amount
-        payoutAmounts[distributionId][investor] = payoutAmount;
+        payoutAmount = (investorSnapshotBalance * totalPayoutAllocated) / dist.totalSnapshotBalance;
         
         return payoutAmount;
     }
@@ -586,10 +590,11 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
                 !paidOut[distributionId][investor]
             ) {
                 uint256 payoutAmount = _calculatePayoutAmount(distributionId, investor);
-                if (payoutAmount > 0 && dist.payoutTokenAmount >= payoutAmount) {
+                if (payoutAmount > 0 && dist.payoutTokenAmount - dist.payoutTokenClaimed >= payoutAmount) {
                     // Mark as paid out before transfer (reentrancy protection)
                     paidOut[distributionId][investor] = true;
-                    dist.payoutTokenAmount -= payoutAmount;
+                    payoutAmounts[distributionId][investor] = payoutAmount;
+                    dist.payoutTokenClaimed += payoutAmount;
                     
                     // Transfer payout
                     if (payoutToken == address(0)) {
@@ -761,7 +766,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         }
 
         payoutAmount = (snapshotBalances[distributionId][investor] * dist.payoutTokenAmount) / dist.totalSnapshotBalance;
-        canClaim = payoutAmount > 0 && dist.payoutTokenAmount >= payoutAmount;
+        canClaim = payoutAmount > 0 && (dist.payoutTokenAmount - dist.payoutTokenClaimed) >= payoutAmount;
     }
 
     // ============ Receive Function ============

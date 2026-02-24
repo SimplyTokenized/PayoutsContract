@@ -45,13 +45,14 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 snapshotBlockNumber;
         uint256 totalSnapshotBalance;
         address payoutToken; // Single payout token for this distribution (address(0) for ETH)
-        uint256 payoutTokenAmount; // Total payout amount allocated (fixed, never decreased)
+        uint256 payoutTokenAmount; // Total amount funded on-chain (Claim + Automatic)
         uint256 claimBalance; // Total snapshot balance for Claim method investors
         uint256 automaticBalance; // Total snapshot balance for Automatic method investors
         uint256 bankBalance; // Total snapshot balance for Bank method investors
         bool initialized;
         uint256 investorCount;
         uint256 payoutTokenClaimed; // Total amount claimed so far (increases as payouts execute)
+        uint256 totalDistributionAmount; // Full intended distribution amount (Claim + Automatic + Bank)
     }
     
     // Distribution data: distributionId => Distribution
@@ -87,6 +88,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     event InvestorBalancesSet(uint256 indexed distributionId, address[] investors, uint256[] balances, uint256 totalBalance);
     event InvestorBalanceAdded(uint256 indexed distributionId, address indexed investor, uint256 balance, uint256 newTotalBalance);
     event PayoutTokenFunded(uint256 indexed distributionId, uint256 amount);
+    event DistributionTotalAmountSet(uint256 indexed distributionId, uint256 amount);
     event PayoutPreferenceSet(uint256 indexed distributionId, address indexed investor, PayoutMethod method);
     event PayoutClaimed(uint256 indexed distributionId, address indexed investor, uint256 amount);
     event PayoutMarkedAsPaid(uint256 indexed distributionId, address indexed investor, uint256 amount);
@@ -157,7 +159,8 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             bankBalance: 0,
             initialized: true,
             investorCount: 0,
-            payoutTokenClaimed: 0
+            payoutTokenClaimed: 0,
+            totalDistributionAmount: 0
         });
         
         emit DistributionCreated(distributionId, _blockNumber, _payoutToken);
@@ -366,18 +369,35 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     }
 
     /**
+     * @dev Set the full intended distribution amount (includes Claim + Automatic + Bank)
+     * @param distributionId The distribution ID
+     * @param amount Total distribution amount reference used for proportional payout calculations
+     * @notice Can only be set once and before any payout is processed
+     */
+    function setDistributionTotalAmount(uint256 distributionId, uint256 amount)
+        external
+        onlyRole(ADMIN_ROLE)
+        whenNotPaused
+    {
+        Distribution storage dist = distributions[distributionId];
+        require(dist.initialized, "PayoutsContract: distribution not found");
+        require(amount > 0, "PayoutsContract: invalid total amount");
+        require(dist.totalDistributionAmount == 0, "PayoutsContract: total amount already set");
+        require(dist.payoutTokenClaimed == 0, "PayoutsContract: payout already started");
+
+        dist.totalDistributionAmount = amount;
+        emit DistributionTotalAmountSet(distributionId, amount);
+    }
+
+    /**
      * @dev Calculate required funding amount excluding bank transfer investors
      * @param distributionId The distribution ID
-     * @param totalPayoutAmount Total payout amount for all investors (including bank investors)
      * @return requiredAmount Total amount needed for Claim and Automatic investors only
      * @notice Bank transfer investors are excluded as they receive payouts off-chain
      * @notice Uses pre-calculated balances per payout method for O(1) calculation (no iteration)
      * @notice Use this to determine how much to fund before calling fundPayoutToken
      */
-    function getRequiredFundingAmount(
-        uint256 distributionId,
-        uint256 totalPayoutAmount
-    )
+    function getRequiredFundingAmount(uint256 distributionId)
         external
         view
         returns (uint256 requiredAmount)
@@ -385,7 +405,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
         
-        if (dist.totalSnapshotBalance == 0) {
+        if (dist.totalSnapshotBalance == 0 || dist.totalDistributionAmount == 0) {
             return 0;
         }
 
@@ -393,7 +413,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 onChainBalance = dist.claimBalance + dist.automaticBalance;
 
         // Calculate required funding: (on-chain balance / total balance) * total payout
-        requiredAmount = (onChainBalance * totalPayoutAmount) / dist.totalSnapshotBalance;
+        requiredAmount = (onChainBalance * dist.totalDistributionAmount) / dist.totalSnapshotBalance;
 
         return requiredAmount;
     }
@@ -447,7 +467,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
      * @param distributionId The distribution ID
      * @param investor Investor address
      * @return payoutAmount Amount the investor should receive
-     * @notice Uses totalPayoutAllocated (payoutTokenAmount) - never the remaining pool - for proportional fairness
+     * @notice Uses totalDistributionAmount as fixed reference for proportional fairness
      * @notice Pure calculation - no state mutation
      */
     function _calculatePayoutAmount(uint256 distributionId, address investor) 
@@ -462,8 +482,10 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         }
 
         uint256 investorSnapshotBalance = snapshotBalances[distributionId][investor];
-        // Use total allocation (payoutTokenAmount) - fixed reference, never decreases
-        uint256 totalPayoutAllocated = dist.payoutTokenAmount;
+        // If totalDistributionAmount is not set, fall back to funded amount for backward compatibility.
+        uint256 totalPayoutAllocated = dist.totalDistributionAmount > 0
+            ? dist.totalDistributionAmount
+            : dist.payoutTokenAmount;
 
         // Calculate proportional payout: (investor_balance / total_snapshot_balance) * total_payout
         payoutAmount = (investorSnapshotBalance * totalPayoutAllocated) / dist.totalSnapshotBalance;
@@ -489,13 +511,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             return 0;
         }
 
-        uint256 investorSnapshotBalance = snapshotBalances[distributionId][investor];
-        uint256 totalPayoutAmount = dist.payoutTokenAmount;
-
-        // Calculate proportional payout
-        payoutAmount = (investorSnapshotBalance * totalPayoutAmount) / dist.totalSnapshotBalance;
-        
-        return payoutAmount;
+        return _calculatePayoutAmount(distributionId, investor);
     }
 
     // ============ Admin Functions ============
@@ -765,7 +781,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             return (false, 0);
         }
 
-        payoutAmount = (snapshotBalances[distributionId][investor] * dist.payoutTokenAmount) / dist.totalSnapshotBalance;
+        payoutAmount = _calculatePayoutAmount(distributionId, investor);
         canClaim = payoutAmount > 0 && (dist.payoutTokenAmount - dist.payoutTokenClaimed) >= payoutAmount;
     }
 

@@ -9,5 +9,9 @@ extra_output = ["storageLayout"]
 optimizer = true
 optimizer_runs = 1
 via_ir = true
+fs_permissions = [
+  { access = "read-write", path = "/Users/Minime/Dev/token/PayoutsContract" },
+  { access = "read-write", path = "/Users/Minime/Dev/token/.cursor" }
+]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

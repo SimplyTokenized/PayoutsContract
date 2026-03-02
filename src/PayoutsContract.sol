@@ -54,9 +54,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 payoutTokenClaimed; // Total amount claimed so far (increases as payouts execute)
         uint256 totalDistributionAmount; // Full intended distribution amount (Claim + Automatic + Bank)
         DistributionMode distributionMode; // Proportional (default) or Manual exact amounts
-        uint256 manualClaimAmount; // Total manual payout amount for Claim method investors
-        uint256 manualAutomaticAmount; // Total manual payout amount for Automatic method investors
-        uint256 manualBankAmount; // Total manual payout amount for Bank method investors
+        DistributionState state; // Distribution lifecycle state
     }
     
     // Distribution data: distributionId => Distribution
@@ -82,6 +80,13 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         Proportional, // 0 - Snapshot-proportional payout calculation
         Manual        // 1 - Exact per-investor amounts set by admin
     }
+
+    // Distribution lifecycle state
+    enum DistributionState {
+        Setup,   // 0 - configuring investors and amounts
+        Payout,  // 1 - payouts active
+        Done     // 2 - distribution finished
+    }
     
     // distributionId => investor => payout method preference
     mapping(uint256 => mapping(address => PayoutMethod)) public payoutPreferences;
@@ -89,10 +94,10 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     // distributionId => investor => whether payout has been claimed/processed
     mapping(uint256 => mapping(address => bool)) public paidOut;
     
-    // distributionId => investor => payout amount (cached calculation)
+    // distributionId => investor => payout amount
+    // - In Proportional mode: cached calculation when payouts are processed
+    // - In Manual mode: final payout amount set during setup
     mapping(uint256 => mapping(address => uint256)) public payoutAmounts;
-    // distributionId => investor => manual payout amount (used only in Manual mode)
-    mapping(uint256 => mapping(address => uint256)) public manualPayoutAmounts;
 
     // Events
     event DistributionCreated(uint256 indexed distributionId, uint256 blockNumber, address indexed payoutToken);
@@ -175,9 +180,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             payoutTokenClaimed: 0,
             totalDistributionAmount: 0,
             distributionMode: DistributionMode.Proportional,
-            manualClaimAmount: 0,
-            manualAutomaticAmount: 0,
-            manualBankAmount: 0
+            state: DistributionState.Setup
         });
         
         emit DistributionCreated(distributionId, _blockNumber, _payoutToken);
@@ -209,6 +212,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Setup, "PayoutsContract: not in setup");
         require(investors.length == balances.length, "PayoutsContract: investors and balances length mismatch");
         require(investors.length == methods.length, "PayoutsContract: investors and methods length mismatch");
         require(investors.length > 0 && investors.length <= MAX_BATCH_SIZE, "PayoutsContract: invalid batch size");
@@ -231,19 +235,10 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
                 // Remove from old method category
                 if (oldMethod == PayoutMethod.Claim) {
                     dist.claimBalance -= oldBalance;
-                    if (dist.distributionMode == DistributionMode.Manual) {
-                        dist.manualClaimAmount -= manualPayoutAmounts[distributionId][investor];
-                    }
                 } else if (oldMethod == PayoutMethod.Automatic) {
                     dist.automaticBalance -= oldBalance;
-                    if (dist.distributionMode == DistributionMode.Manual) {
-                        dist.manualAutomaticAmount -= manualPayoutAmounts[distributionId][investor];
-                    }
                 } else if (oldMethod == PayoutMethod.Bank) {
                     dist.bankBalance -= oldBalance;
-                    if (dist.distributionMode == DistributionMode.Manual) {
-                        dist.manualBankAmount -= manualPayoutAmounts[distributionId][investor];
-                    }
                 }
             }
             
@@ -264,19 +259,10 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
                 // Add to new method category
                 if (method == PayoutMethod.Claim) {
                     dist.claimBalance += balance;
-                    if (dist.distributionMode == DistributionMode.Manual) {
-                        dist.manualClaimAmount += manualPayoutAmounts[distributionId][investor];
-                    }
                 } else if (method == PayoutMethod.Automatic) {
                     dist.automaticBalance += balance;
-                    if (dist.distributionMode == DistributionMode.Manual) {
-                        dist.manualAutomaticAmount += manualPayoutAmounts[distributionId][investor];
-                    }
                 } else if (method == PayoutMethod.Bank) {
                     dist.bankBalance += balance;
-                    if (dist.distributionMode == DistributionMode.Manual) {
-                        dist.manualBankAmount += manualPayoutAmounts[distributionId][investor];
-                    }
                 }
             } else if (oldBalance > 0) {
                 // Remove investor balance (should rarely be needed)
@@ -285,9 +271,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
                 balanceDelta -= oldBalance;
                 snapshotBalances[distributionId][investor] = 0;
                 payoutPreferences[distributionId][investor] = PayoutMethod.None;
-                if (dist.distributionMode == DistributionMode.Manual) {
-                    manualPayoutAmounts[distributionId][investor] = 0;
-                }
+                payoutAmounts[distributionId][investor] = 0;
             }
         }
 
@@ -320,6 +304,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Setup, "PayoutsContract: not in setup");
         require(investor != address(0), "PayoutsContract: invalid investor address");
         require(method != PayoutMethod.None, "PayoutsContract: payout method must be set");
 
@@ -331,19 +316,10 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             // Remove from old method category
             if (oldMethod == PayoutMethod.Claim) {
                 dist.claimBalance -= oldBalance;
-                if (dist.distributionMode == DistributionMode.Manual) {
-                    dist.manualClaimAmount -= manualPayoutAmounts[distributionId][investor];
-                }
             } else if (oldMethod == PayoutMethod.Automatic) {
                 dist.automaticBalance -= oldBalance;
-                if (dist.distributionMode == DistributionMode.Manual) {
-                    dist.manualAutomaticAmount -= manualPayoutAmounts[distributionId][investor];
-                }
             } else if (oldMethod == PayoutMethod.Bank) {
                 dist.bankBalance -= oldBalance;
-                if (dist.distributionMode == DistributionMode.Manual) {
-                    dist.manualBankAmount -= manualPayoutAmounts[distributionId][investor];
-                }
             }
         }
         
@@ -364,19 +340,10 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             // Add to new method category
             if (method == PayoutMethod.Claim) {
                 dist.claimBalance += balance;
-                if (dist.distributionMode == DistributionMode.Manual) {
-                    dist.manualClaimAmount += manualPayoutAmounts[distributionId][investor];
-                }
             } else if (method == PayoutMethod.Automatic) {
                 dist.automaticBalance += balance;
-                if (dist.distributionMode == DistributionMode.Manual) {
-                    dist.manualAutomaticAmount += manualPayoutAmounts[distributionId][investor];
-                }
             } else if (method == PayoutMethod.Bank) {
                 dist.bankBalance += balance;
-                if (dist.distributionMode == DistributionMode.Manual) {
-                    dist.manualBankAmount += manualPayoutAmounts[distributionId][investor];
-                }
             }
             
             emit InvestorBalanceAdded(distributionId, investor, balance, dist.totalSnapshotBalance);
@@ -387,9 +354,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             payoutPreferences[distributionId][investor] = PayoutMethod.None;
             isInvestor[distributionId][investor] = false;
             dist.investorCount--;
-            if (dist.distributionMode == DistributionMode.Manual) {
-                manualPayoutAmounts[distributionId][investor] = 0;
-            }
+            payoutAmounts[distributionId][investor] = 0;
         }
     }
 
@@ -411,6 +376,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Setup, "PayoutsContract: not in setup");
         
         address payoutToken = dist.payoutToken;
         
@@ -440,6 +406,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Setup, "PayoutsContract: not in setup");
         require(dist.distributionMode == DistributionMode.Proportional, "PayoutsContract: manual mode active");
         require(amount > 0, "PayoutsContract: invalid total amount");
         require(dist.totalDistributionAmount == 0, "PayoutsContract: total amount already set");
@@ -462,17 +429,11 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Setup, "PayoutsContract: not in setup");
         require(dist.payoutTokenClaimed == 0, "PayoutsContract: payout already started");
         require(dist.distributionMode != mode, "PayoutsContract: mode already set");
 
         dist.distributionMode = mode;
-
-        // Switching to proportional clears manual totals references.
-        if (mode == DistributionMode.Proportional) {
-            dist.manualClaimAmount = 0;
-            dist.manualAutomaticAmount = 0;
-            dist.manualBankAmount = 0;
-        }
 
         emit DistributionModeSet(distributionId, mode);
     }
@@ -496,6 +457,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Setup, "PayoutsContract: not in setup");
         require(dist.distributionMode == DistributionMode.Manual, "PayoutsContract: not manual mode");
         require(dist.payoutTokenClaimed == 0, "PayoutsContract: payout already started");
         require(investors.length == amounts.length, "PayoutsContract: investors and amounts length mismatch");
@@ -507,32 +469,10 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             require(investor != address(0), "PayoutsContract: invalid investor address");
             require(snapshotBalances[distributionId][investor] > 0, "PayoutsContract: not an investor");
 
-            uint256 oldAmount = manualPayoutAmounts[distributionId][investor];
+            uint256 oldAmount = payoutAmounts[distributionId][investor];
             PayoutMethod method = payoutPreferences[distributionId][investor];
 
-            // Remove old manual amount from method totals.
-            if (oldAmount > 0) {
-                if (method == PayoutMethod.Claim) {
-                    dist.manualClaimAmount -= oldAmount;
-                } else if (method == PayoutMethod.Automatic) {
-                    dist.manualAutomaticAmount -= oldAmount;
-                } else if (method == PayoutMethod.Bank) {
-                    dist.manualBankAmount -= oldAmount;
-                }
-            }
-
-            manualPayoutAmounts[distributionId][investor] = amount;
-
-            // Add new manual amount to method totals.
-            if (amount > 0) {
-                if (method == PayoutMethod.Claim) {
-                    dist.manualClaimAmount += amount;
-                } else if (method == PayoutMethod.Automatic) {
-                    dist.manualAutomaticAmount += amount;
-                } else if (method == PayoutMethod.Bank) {
-                    dist.manualBankAmount += amount;
-                }
-            }
+            payoutAmounts[distributionId][investor] = amount;
         }
 
         emit ManualPayoutAmountsSet(distributionId, investors, amounts);
@@ -554,9 +494,12 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
         
-        if (dist.distributionMode == DistributionMode.Manual) {
-            return dist.manualClaimAmount + dist.manualAutomaticAmount;
-        }
+        // In Manual mode, required funding must be determined off-chain based on
+        // per-investor payoutAmounts and payoutPreferences.
+        require(
+            dist.distributionMode != DistributionMode.Manual,
+            "PayoutsContract: use off-chain calculation in manual mode"
+        );
 
         if (dist.totalSnapshotBalance == 0 || dist.totalDistributionAmount == 0) {
             return 0;
@@ -631,7 +574,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         Distribution storage dist = distributions[distributionId];
 
         if (dist.distributionMode == DistributionMode.Manual) {
-            return manualPayoutAmounts[distributionId][investor];
+            return payoutAmounts[distributionId][investor];
         }
         
         if (dist.totalSnapshotBalance == 0) {

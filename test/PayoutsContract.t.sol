@@ -94,6 +94,7 @@ contract PayoutsContractTest is Test {
         assertTrue(payouts.hasRole(payouts.WHITELIST_ROLE(), admin));
     }
 
+
     // Note: test_Initialization_InvalidBaseToken removed - can't test invalid initialization through proxy
     // The proxy deployment would fail during initialization, making this test impractical
 
@@ -570,7 +571,9 @@ contract PayoutsContractTest is Test {
 
         vm.prank(admin);
         payouts.setManualPayoutAmounts(distributionId1, investors, amounts);
-        assertEq(payouts.getRequiredFundingAmount(distributionId1), 700 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor1), 700 * 10 ** 18);
+        vm.expectRevert("PayoutsContract: use off-chain calculation in manual mode");
+        payouts.getRequiredFundingAmount(distributionId1);
 
         vm.prank(admin);
         payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Proportional);
@@ -614,9 +617,14 @@ contract PayoutsContractTest is Test {
         emit ManualPayoutAmountsSet(distributionId1, investors, manualAmounts);
         payouts.setManualPayoutAmounts(distributionId1, investors, manualAmounts);
 
-        // Required on-chain funding should include Claim + Automatic only.
-        uint256 requiredAmount = payouts.getRequiredFundingAmount(distributionId1);
-        assertEq(requiredAmount, 2800 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor1), 1100 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor2), 1700 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor3), 2500 * 10 ** 18);
+        vm.expectRevert("PayoutsContract: use off-chain calculation in manual mode");
+        payouts.getRequiredFundingAmount(distributionId1);
+
+        // Manual mode funding amount is calculated off-chain.
+        uint256 requiredAmount = 2800 * 10 ** 18;
 
         payoutToken.mint(admin, requiredAmount);
         payoutToken.approve(address(payouts), requiredAmount);
@@ -640,9 +648,9 @@ contract PayoutsContractTest is Test {
         payouts.markPayoutAsPaid(distributionId1, investor3);
         assertTrue(payouts.paidOut(distributionId1, investor3));
 
-        assertEq(payouts.manualPayoutAmounts(distributionId1, investor1), 1100 * 10 ** 18);
-        assertEq(payouts.manualPayoutAmounts(distributionId1, investor2), 1700 * 10 ** 18);
-        assertEq(payouts.manualPayoutAmounts(distributionId1, investor3), 2500 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor1), 1100 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor2), 1700 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor3), 2500 * 10 ** 18);
     }
 
     function test_SetManualPayoutAmounts_RevertWhenNotManualMode() public {
@@ -810,14 +818,20 @@ contract PayoutsContractTest is Test {
         amounts1[1] = 700 * 10 ** 18;
         vm.prank(admin);
         payouts.setManualPayoutAmounts(distributionId1, investors, amounts1);
-        assertEq(payouts.getRequiredFundingAmount(distributionId1), 1200 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor1), 500 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor2), 700 * 10 ** 18);
+        vm.expectRevert("PayoutsContract: use off-chain calculation in manual mode");
+        payouts.getRequiredFundingAmount(distributionId1);
 
         uint256[] memory amounts2 = new uint256[](2);
         amounts2[0] = 900 * 10 ** 18;
         amounts2[1] = 300 * 10 ** 18;
         vm.prank(admin);
         payouts.setManualPayoutAmounts(distributionId1, investors, amounts2);
-        assertEq(payouts.getRequiredFundingAmount(distributionId1), 1200 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor1), 900 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor2), 300 * 10 ** 18);
+        vm.expectRevert("PayoutsContract: use off-chain calculation in manual mode");
+        payouts.getRequiredFundingAmount(distributionId1);
     }
 
     function test_ManualPayoutAmountTracksMethodChange() public {
@@ -836,12 +850,16 @@ contract PayoutsContractTest is Test {
 
         vm.prank(admin);
         payouts.setManualPayoutAmounts(distributionId1, investors, amounts);
-        assertEq(payouts.getRequiredFundingAmount(distributionId1), 1000 * 10 ** 18);
+        assertEq(payouts.payoutAmounts(distributionId1, investor1), 1000 * 10 ** 18);
+        vm.expectRevert("PayoutsContract: use off-chain calculation in manual mode");
+        payouts.getRequiredFundingAmount(distributionId1);
 
         // Move same investor to bank payout method, on-chain required funding should drop to zero.
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Bank);
-        assertEq(payouts.getRequiredFundingAmount(distributionId1), 0);
+        assertEq(payouts.payoutAmounts(distributionId1, investor1), 1000 * 10 ** 18);
+        vm.expectRevert("PayoutsContract: use off-chain calculation in manual mode");
+        payouts.getRequiredFundingAmount(distributionId1);
     }
 
     // ============ Claim Payout Tests ============
@@ -1012,6 +1030,7 @@ contract PayoutsContractTest is Test {
         arr[1] = b;
         return arr;
     }
+
 
     function test_ClaimPayout_InvalidConditions() public {
         vm.prank(snapshotRole);

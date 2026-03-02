@@ -25,10 +25,7 @@ contract DeployPayouts is Script {
         address proxyAddress = Upgrades.deployTransparentProxy(
             "PayoutsContract.sol",
             admin, // Proxy admin
-            abi.encodeCall(
-                PayoutsContract.initialize,
-                (baseToken, admin)
-            )
+            abi.encodeCall(PayoutsContract.initialize, (baseToken, admin))
         );
 
         payouts = PayoutsContract(payable(proxyAddress));

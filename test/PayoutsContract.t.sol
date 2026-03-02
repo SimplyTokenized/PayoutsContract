@@ -22,7 +22,7 @@ contract PayoutsContractTest is Test {
     PayoutsContract public payouts;
     MockERC20 public baseToken;
     MockERC20 public payoutToken;
-    
+
     address public admin;
     address public snapshotRole;
     address public whitelistRole;
@@ -30,14 +30,16 @@ contract PayoutsContractTest is Test {
     address public investor2;
     address public investor3;
     address public nonInvestor;
-    
+
     uint256 public distributionId1;
     uint256 public distributionId2;
-    
+
     uint256 public constant INITIAL_BALANCE = 10000 * 10 ** 18;
 
     event DistributionCreated(uint256 indexed distributionId, uint256 blockNumber, address indexed payoutToken);
-    event InvestorBalancesSet(uint256 indexed distributionId, address[] investors, uint256[] balances, uint256 totalBalance);
+    event InvestorBalancesSet(
+        uint256 indexed distributionId, address[] investors, uint256[] balances, uint256 totalBalance
+    );
     event PayoutTokenFunded(uint256 indexed distributionId, uint256 amount);
     event DistributionTotalAmountSet(uint256 indexed distributionId, uint256 amount);
     event DistributionModeSet(uint256 indexed distributionId, PayoutsContract.DistributionMode mode);
@@ -66,13 +68,8 @@ contract PayoutsContractTest is Test {
 
         // Deploy PayoutsContract with proxy
         address payable proxyAddress = payable(Upgrades.deployTransparentProxy(
-            "PayoutsContract.sol",
-            admin,
-            abi.encodeCall(
-                PayoutsContract.initialize,
-                (address(baseToken), admin)
-            )
-        ));
+                "PayoutsContract.sol", admin, abi.encodeCall(PayoutsContract.initialize, (address(baseToken), admin))
+            ));
 
         payouts = PayoutsContract(proxyAddress);
 
@@ -94,7 +91,6 @@ contract PayoutsContractTest is Test {
         assertTrue(payouts.hasRole(payouts.WHITELIST_ROLE(), admin));
     }
 
-
     // Note: test_Initialization_InvalidBaseToken removed - can't test invalid initialization through proxy
     // The proxy deployment would fail during initialization, making this test impractical
 
@@ -108,7 +104,7 @@ contract PayoutsContractTest is Test {
 
         assertEq(distributionId1, 1);
         assertEq(payouts.nextDistributionId(), 2);
-        
+
         PayoutsContract.Distribution memory dist = payouts.getDistribution(distributionId1);
         assertEq(dist.distributionId, 1);
         assertEq(dist.snapshotBlockNumber, block.number);
@@ -198,9 +194,16 @@ contract PayoutsContractTest is Test {
         assertEq(payouts.snapshotBalances(distributionId1, investor1), 1000 * 10 ** 18);
         assertEq(payouts.snapshotBalances(distributionId1, investor2), 2000 * 10 ** 18);
         assertEq(payouts.snapshotBalances(distributionId1, investor3), 3000 * 10 ** 18);
-        assertEq(uint256(payouts.payoutPreferences(distributionId1, investor1)), uint256(PayoutsContract.PayoutMethod.Claim));
-        assertEq(uint256(payouts.payoutPreferences(distributionId1, investor2)), uint256(PayoutsContract.PayoutMethod.Automatic));
-        assertEq(uint256(payouts.payoutPreferences(distributionId1, investor3)), uint256(PayoutsContract.PayoutMethod.Bank));
+        assertEq(
+            uint256(payouts.payoutPreferences(distributionId1, investor1)), uint256(PayoutsContract.PayoutMethod.Claim)
+        );
+        assertEq(
+            uint256(payouts.payoutPreferences(distributionId1, investor2)),
+            uint256(PayoutsContract.PayoutMethod.Automatic)
+        );
+        assertEq(
+            uint256(payouts.payoutPreferences(distributionId1, investor3)), uint256(PayoutsContract.PayoutMethod.Bank)
+        );
     }
 
     function test_SetInvestorBalance_Single() public {
@@ -281,7 +284,7 @@ contract PayoutsContractTest is Test {
         investors = new address[](201);
         balances = new uint256[](201);
         methods = new PayoutsContract.PayoutMethod[](201);
-        for (uint i = 0; i < 201; i++) {
+        for (uint256 i = 0; i < 201; i++) {
             investors[i] = address(uint160(i + 100));
             balances[i] = 100 * 10 ** 18;
             methods[i] = PayoutsContract.PayoutMethod.Claim;
@@ -316,7 +319,7 @@ contract PayoutsContractTest is Test {
         distributionId1 = payouts.createDistribution(block.number, address(0));
 
         uint256 fundingAmount = 10 ether;
-        
+
         vm.deal(admin, fundingAmount);
         vm.prank(admin);
         payouts.fundPayoutToken{value: fundingAmount}(distributionId1, fundingAmount);
@@ -342,13 +345,13 @@ contract PayoutsContractTest is Test {
 
         uint256 amount1 = 5000 * 10 ** 18;
         uint256 amount2 = 3000 * 10 ** 18;
-        
+
         payoutToken.mint(admin, amount1 + amount2);
         payoutToken.approve(address(payouts), amount1 + amount2);
 
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, amount1);
-        
+
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, amount2);
 
@@ -382,7 +385,7 @@ contract PayoutsContractTest is Test {
         vm.prank(admin);
         payouts.setDistributionTotalAmount(distributionId1, totalPayoutAmount);
         uint256 requiredAmount = payouts.getRequiredFundingAmount(distributionId1);
-        
+
         // Should be (1000 + 2000) / 6000 * 6000 = 3000 (excludes bank)
         assertEq(requiredAmount, 3000 * 10 ** 18);
     }
@@ -957,10 +960,10 @@ contract PayoutsContractTest is Test {
      *         Example: 50/50 split, 1000 total -> both must get 500 regardless of claim order.
      */
     function test_Regression_ProportionalPayout_OrderIndependent() public {
-        uint256 totalPayout = 1000 * 10 ** 18;   // 1000 USDC allocated
-        uint256 balanceA = 50 * 10 ** 18;        // 50%
-        uint256 balanceB = 50 * 10 ** 18;        // 50%
-        uint256 expectedEach = 500 * 10 ** 18;   // (50/100) * 1000 = 500
+        uint256 totalPayout = 1000 * 10 ** 18; // 1000 USDC allocated
+        uint256 balanceA = 50 * 10 ** 18; // 50%
+        uint256 balanceB = 50 * 10 ** 18; // 50%
+        uint256 expectedEach = 500 * 10 ** 18; // (50/100) * 1000 = 500
 
         // Setup distribution 1: A claims first, B claims second
         vm.prank(snapshotRole);
@@ -983,7 +986,9 @@ contract PayoutsContractTest is Test {
         payouts.claimPayout(distributionId1);
 
         assertEq(payoutToken.balanceOf(investor1), expectedEach, "A must get 500");
-        assertEq(payoutToken.balanceOf(investor2), expectedEach, "B must get 500 when claiming second (bug would give 250)");
+        assertEq(
+            payoutToken.balanceOf(investor2), expectedEach, "B must get 500 when claiming second (bug would give 250)"
+        );
 
         // Setup distribution 2: B claims first, A claims second (reverse order)
         vm.roll(block.number + 1);
@@ -1024,13 +1029,16 @@ contract PayoutsContractTest is Test {
         return arr;
     }
 
-    function _arr(PayoutsContract.PayoutMethod a, PayoutsContract.PayoutMethod b) internal pure returns (PayoutsContract.PayoutMethod[] memory) {
+    function _arr(PayoutsContract.PayoutMethod a, PayoutsContract.PayoutMethod b)
+        internal
+        pure
+        returns (PayoutsContract.PayoutMethod[] memory)
+    {
         PayoutsContract.PayoutMethod[] memory arr = new PayoutsContract.PayoutMethod[](2);
         arr[0] = a;
         arr[1] = b;
         return arr;
     }
-
 
     function test_ClaimPayout_InvalidConditions() public {
         vm.prank(snapshotRole);
@@ -1047,7 +1055,7 @@ contract PayoutsContractTest is Test {
         // Wrong payout method
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor2, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Automatic);
-        
+
         uint256 fundingAmount = 1000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
@@ -1061,7 +1069,7 @@ contract PayoutsContractTest is Test {
         // Already paid out
         vm.prank(investor1);
         payouts.claimPayout(distributionId1);
-        
+
         vm.prank(investor1);
         vm.expectRevert("PayoutsContract: already paid out");
         payouts.claimPayout(distributionId1);
@@ -1092,7 +1100,7 @@ contract PayoutsContractTest is Test {
         // Non-whitelisted
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor2, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
-        
+
         uint256 fundingAmount2 = 1000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount2);
         payoutToken.approve(address(payouts), fundingAmount2);
@@ -1242,7 +1250,7 @@ contract PayoutsContractTest is Test {
         distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
 
         address[] memory investors = new address[](201);
-        for (uint i = 0; i < 201; i++) {
+        for (uint256 i = 0; i < 201; i++) {
             investors[i] = address(uint160(i + 100));
         }
 
@@ -1265,7 +1273,7 @@ contract PayoutsContractTest is Test {
         distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
 
         address[] memory investors = new address[](201);
-        for (uint i = 0; i < 201; i++) {
+        for (uint256 i = 0; i < 201; i++) {
             investors[i] = address(uint160(i + 100));
         }
 
@@ -1382,7 +1390,7 @@ contract PayoutsContractTest is Test {
 
     function test_BatchAddToWhitelist_ExceedsMaxBatchSize() public {
         address[] memory accounts = new address[](201);
-        for (uint i = 0; i < 201; i++) {
+        for (uint256 i = 0; i < 201; i++) {
             accounts[i] = address(uint160(i + 100));
         }
 
@@ -1393,7 +1401,7 @@ contract PayoutsContractTest is Test {
 
     function test_BatchRemoveFromWhitelist_ExceedsMaxBatchSize() public {
         address[] memory accounts = new address[](201);
-        for (uint i = 0; i < 201; i++) {
+        for (uint256 i = 0; i < 201; i++) {
             accounts[i] = address(uint160(i + 100));
         }
 
@@ -1552,7 +1560,7 @@ contract PayoutsContractTest is Test {
     function test_Unpause() public {
         vm.prank(admin);
         payouts.pause();
-        
+
         vm.prank(admin);
         payouts.unpause();
 
@@ -1583,7 +1591,7 @@ contract PayoutsContractTest is Test {
     function test_EmergencyWithdraw_ETH() public {
         // Send ETH to contract using vm.deal directly on the contract
         vm.deal(address(payouts), 10 ether);
-        
+
         address recipient = address(0x999);
         vm.deal(recipient, 0); // Ensure recipient starts with 0 balance
         uint256 balanceBefore = recipient.balance;
@@ -1660,7 +1668,7 @@ contract PayoutsContractTest is Test {
 
         assertEq(payoutToken.balanceOf(investor1), balanceBefore + 1000 * 10 ** 18);
         assertTrue(payouts.paidOut(distributionId1, investor1));
-        
+
         PayoutsContract.Distribution memory dist = payouts.getDistribution(distributionId1);
         assertEq(dist.payoutTokenAmount, fundingAmount); // Total allocated (fixed)
         assertEq(dist.payoutTokenClaimed, fundingAmount); // All claimed
@@ -1702,7 +1710,7 @@ contract PayoutsContractTest is Test {
         // Claim
         uint256 balance1Before = payoutToken.balanceOf(investor1);
         uint256 balance2Before = payoutToken.balanceOf(investor2);
-        
+
         vm.prank(investor1);
         payouts.claimPayout(distributionId1);
         // Investor1: (1000 / 6000) * 6000 = 1000
@@ -1720,7 +1728,7 @@ contract PayoutsContractTest is Test {
         vm.prank(admin);
         payouts.markPayoutAsPaid(distributionId1, investor3);
         assertTrue(payouts.paidOut(distributionId1, investor3));
-        
+
         // Investor1 got 1000, Investor2 got 2000. Total on-chain distributed: 3000
         // Remaining in contract: 3000 - 3000 = 0 (Bank investor paid off-chain)
         assertEq(payoutToken.balanceOf(address(payouts)), 0);

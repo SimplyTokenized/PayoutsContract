@@ -42,7 +42,6 @@ contract PayoutsContractTest is Test {
     );
     event PayoutTokenFunded(uint256 indexed distributionId, uint256 amount);
     event DistributionTotalAmountSet(uint256 indexed distributionId, uint256 amount);
-    event DistributionModeSet(uint256 indexed distributionId, PayoutsContract.DistributionMode mode);
     event ManualPayoutAmountsSet(uint256 indexed distributionId, address[] investors, uint256[] amounts);
     event PayoutClaimed(uint256 indexed distributionId, address indexed investor, uint256 amount);
     event PayoutMarkedAsPaid(uint256 indexed distributionId, address indexed investor, uint256 amount);
@@ -299,6 +298,8 @@ contract PayoutsContractTest is Test {
     function test_FundPayoutToken_ERC20() public {
         vm.prank(snapshotRole);
         distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        address[] memory noInvestors = new address[](0);
+        _moveToPayout(distributionId1, noInvestors);
 
         uint256 fundingAmount = 10000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
@@ -317,6 +318,8 @@ contract PayoutsContractTest is Test {
     function test_FundPayoutToken_ETH() public {
         vm.prank(snapshotRole);
         distributionId1 = payouts.createDistribution(block.number, address(0));
+        address[] memory noInvestors = new address[](0);
+        _moveToPayout(distributionId1, noInvestors);
 
         uint256 fundingAmount = 10 ether;
 
@@ -332,6 +335,8 @@ contract PayoutsContractTest is Test {
     function test_FundPayoutToken_ETHAmountMismatch() public {
         vm.prank(snapshotRole);
         distributionId1 = payouts.createDistribution(block.number, address(0));
+        address[] memory noInvestors = new address[](0);
+        _moveToPayout(distributionId1, noInvestors);
 
         vm.deal(admin, 10 ether);
         vm.prank(admin);
@@ -342,6 +347,8 @@ contract PayoutsContractTest is Test {
     function test_FundPayoutToken_MultipleFundings() public {
         vm.prank(snapshotRole);
         distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        address[] memory noInvestors = new address[](0);
+        _moveToPayout(distributionId1, noInvestors);
 
         uint256 amount1 = 5000 * 10 ** 18;
         uint256 amount2 = 3000 * 10 ** 18;
@@ -464,6 +471,9 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 1000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -471,7 +481,7 @@ contract PayoutsContractTest is Test {
         payouts.claimPayout(distributionId1);
 
         vm.prank(admin);
-        vm.expectRevert("PayoutsContract: payout already started");
+        vm.expectRevert("PayoutsContract: not in setup");
         payouts.setDistributionTotalAmount(distributionId1, 1000 * 10 ** 18);
     }
 
@@ -486,57 +496,32 @@ contract PayoutsContractTest is Test {
 
     function test_SetDistributionTotalAmount_RevertWhenManualModeActive() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
-
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         vm.prank(admin);
         vm.expectRevert("PayoutsContract: manual mode active");
         payouts.setDistributionTotalAmount(distributionId1, 1000 * 10 ** 18);
     }
 
-    function test_SetDistributionMode() public {
+    function test_CreateDistribution_WithManualMode() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
-
-        vm.prank(admin);
-        vm.expectEmit(true, false, false, true);
-        emit DistributionModeSet(distributionId1, PayoutsContract.DistributionMode.Manual);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         PayoutsContract.Distribution memory dist = payouts.getDistribution(distributionId1);
         assertEq(uint256(dist.distributionMode), uint256(PayoutsContract.DistributionMode.Manual));
     }
 
-    function test_SetDistributionMode_AlreadySet() public {
+    function test_CreateDistribution_WithDefaultProportionalMode() public {
         vm.prank(snapshotRole);
         distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
 
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
-
-        vm.prank(admin);
-        vm.expectRevert("PayoutsContract: mode already set");
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
+        PayoutsContract.Distribution memory dist = payouts.getDistribution(distributionId1);
+        assertEq(uint256(dist.distributionMode), uint256(PayoutsContract.DistributionMode.Proportional));
     }
 
-    function test_SetDistributionMode_InvalidDistribution() public {
-        vm.prank(admin);
-        vm.expectRevert("PayoutsContract: distribution not found");
-        payouts.setDistributionMode(999, PayoutsContract.DistributionMode.Manual);
-    }
-
-    function test_SetDistributionMode_Unauthorized() public {
-        vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
-
-        vm.prank(investor1);
-        vm.expectRevert();
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
-    }
-
-    function test_SetDistributionMode_AfterPayoutStarted() public {
+    function test_CreateDistribution_ManualMode_AfterPayoutStartedInAnotherDistribution() public {
         vm.prank(snapshotRole);
         distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
 
@@ -546,26 +531,30 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 1000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
         vm.prank(investor1);
         payouts.claimPayout(distributionId1);
 
-        vm.prank(admin);
-        vm.expectRevert("PayoutsContract: payout already started");
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
+        vm.roll(block.number + 1);
+        vm.prank(snapshotRole);
+        distributionId2 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
+        PayoutsContract.Distribution memory dist2 = payouts.getDistribution(distributionId2);
+        assertEq(uint256(dist2.distributionMode), uint256(PayoutsContract.DistributionMode.Manual));
     }
 
-    function test_SetDistributionMode_BackToProportionalClearsManualTotals() public {
+    function test_ManualModeRequiredFundingReverts() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
-
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
 
         address[] memory investors = new address[](1);
         investors[0] = investor1;
@@ -577,17 +566,12 @@ contract PayoutsContractTest is Test {
         assertEq(payouts.payoutAmounts(distributionId1, investor1), 700 * 10 ** 18);
         vm.expectRevert("PayoutsContract: use off-chain calculation in manual mode");
         payouts.getRequiredFundingAmount(distributionId1);
-
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Proportional);
-
-        // Without totalDistributionAmount set, proportional required funding returns 0.
-        assertEq(payouts.getRequiredFundingAmount(distributionId1), 0);
     }
 
     function test_SetManualPayoutAmounts_ManualMode() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         address[] memory investors = new address[](3);
         investors[0] = investor1; // Claim
@@ -606,9 +590,6 @@ contract PayoutsContractTest is Test {
 
         vm.prank(snapshotRole);
         payouts.setInvestorBalances(distributionId1, investors, balances, methods);
-
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
 
         uint256[] memory manualAmounts = new uint256[](3);
         manualAmounts[0] = 1100 * 10 ** 18;
@@ -631,6 +612,7 @@ contract PayoutsContractTest is Test {
 
         payoutToken.mint(admin, requiredAmount);
         payoutToken.approve(address(payouts), requiredAmount);
+        _moveToPayout(distributionId1, investors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, requiredAmount);
 
@@ -686,11 +668,10 @@ contract PayoutsContractTest is Test {
 
     function test_SetManualPayoutAmounts_LengthMismatch() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
 
         address[] memory investors = new address[](1);
         investors[0] = investor1;
@@ -705,9 +686,8 @@ contract PayoutsContractTest is Test {
 
     function test_SetManualPayoutAmounts_InvalidBatchSize() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         address[] memory investors = new address[](0);
         uint256[] memory amounts = new uint256[](0);
@@ -718,9 +698,8 @@ contract PayoutsContractTest is Test {
 
     function test_SetManualPayoutAmounts_InvalidInvestorAddress() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         address[] memory investors = new address[](1);
         investors[0] = address(0);
@@ -734,9 +713,8 @@ contract PayoutsContractTest is Test {
 
     function test_SetManualPayoutAmounts_NotInvestor() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         address[] memory investors = new address[](1);
         investors[0] = investor1;
@@ -750,11 +728,10 @@ contract PayoutsContractTest is Test {
 
     function test_SetManualPayoutAmounts_Unauthorized() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
 
         address[] memory investors = new address[](1);
         investors[0] = investor1;
@@ -768,13 +745,11 @@ contract PayoutsContractTest is Test {
 
     function test_SetManualPayoutAmounts_AfterPayoutStarted() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
-
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
 
         address[] memory investors = new address[](1);
         investors[0] = investor1;
@@ -786,6 +761,7 @@ contract PayoutsContractTest is Test {
 
         payoutToken.mint(admin, 900 * 10 ** 18);
         payoutToken.approve(address(payouts), 900 * 10 ** 18);
+        _moveToPayout(distributionId1, investors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, 900 * 10 ** 18);
 
@@ -793,13 +769,14 @@ contract PayoutsContractTest is Test {
         payouts.claimPayout(distributionId1);
 
         vm.prank(admin);
-        vm.expectRevert("PayoutsContract: payout already started");
+        vm.expectRevert("PayoutsContract: not in setup");
         payouts.setManualPayoutAmounts(distributionId1, investors, amounts);
     }
 
     function test_SetManualPayoutAmounts_UpdateExistingAdjustsRequiredFunding() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         address[] memory investors = new address[](2);
         investors[0] = investor1; // Claim
@@ -812,9 +789,6 @@ contract PayoutsContractTest is Test {
         methods[1] = PayoutsContract.PayoutMethod.Automatic;
         vm.prank(snapshotRole);
         payouts.setInvestorBalances(distributionId1, investors, balances, methods);
-
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
 
         uint256[] memory amounts1 = new uint256[](2);
         amounts1[0] = 500 * 10 ** 18;
@@ -839,13 +813,11 @@ contract PayoutsContractTest is Test {
 
     function test_ManualPayoutAmountTracksMethodChange() public {
         vm.prank(snapshotRole);
-        distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
+        distributionId1 =
+            payouts.createDistribution(block.number, address(payoutToken), PayoutsContract.DistributionMode.Manual);
 
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
-        vm.prank(admin);
-        payouts.setDistributionMode(distributionId1, PayoutsContract.DistributionMode.Manual);
-
         address[] memory investors = new address[](1);
         investors[0] = investor1;
         uint256[] memory amounts = new uint256[](1);
@@ -877,6 +849,9 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 1000 * 10 ** 18; // Match snapshot balance for 1:1 payout
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
 
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
@@ -902,6 +877,9 @@ contract PayoutsContractTest is Test {
 
         uint256 fundingAmount = 1000 ether; // Match snapshot balance for 1:1 payout
         vm.deal(admin, fundingAmount);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
         vm.prank(admin);
         payouts.fundPayoutToken{value: fundingAmount}(distributionId1, fundingAmount);
 
@@ -937,6 +915,7 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 3000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        _moveToPayout(distributionId1, investors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -975,8 +954,11 @@ contract PayoutsContractTest is Test {
             _arr(balanceA, balanceB),
             _arr(PayoutsContract.PayoutMethod.Claim, PayoutsContract.PayoutMethod.Claim)
         );
+        vm.prank(admin);
+        payouts.setDistributionTotalAmount(distributionId1, totalPayout);
         payoutToken.mint(admin, totalPayout);
         payoutToken.approve(address(payouts), totalPayout);
+        _moveToPayout(distributionId1, _arr(investor1, investor2));
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, totalPayout);
 
@@ -1001,8 +983,11 @@ contract PayoutsContractTest is Test {
             _arr(balanceA, balanceB),
             _arr(PayoutsContract.PayoutMethod.Claim, PayoutsContract.PayoutMethod.Claim)
         );
+        vm.prank(admin);
+        payouts.setDistributionTotalAmount(distributionId2, totalPayout);
         payoutToken.mint(admin, totalPayout);
         payoutToken.approve(address(payouts), totalPayout);
+        _moveToPayout(distributionId2, _arr(investor1, investor2));
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId2, totalPayout);
 
@@ -1040,21 +1025,46 @@ contract PayoutsContractTest is Test {
         return arr;
     }
 
+    function _moveToPayout(uint256 distributionId, address[] memory investorsForCompute) internal {
+        PayoutsContract.Distribution memory dist = payouts.getDistribution(distributionId);
+        if (
+            dist.distributionMode == PayoutsContract.DistributionMode.Proportional && dist.totalDistributionAmount == 0
+                && dist.totalSnapshotBalance > 0
+        ) {
+            vm.prank(admin);
+            payouts.setDistributionTotalAmount(distributionId, dist.totalSnapshotBalance);
+            dist = payouts.getDistribution(distributionId);
+        }
+
+        vm.prank(admin);
+        payouts.startCompute(distributionId);
+
+        if (dist.distributionMode == PayoutsContract.DistributionMode.Proportional && investorsForCompute.length > 0) {
+            vm.prank(admin);
+            payouts.computePayoutAmounts(distributionId, investorsForCompute);
+        }
+
+        vm.prank(admin);
+        payouts.finalizeCompute(distributionId);
+    }
+
     function test_ClaimPayout_InvalidConditions() public {
         vm.prank(snapshotRole);
         distributionId1 = payouts.createDistribution(block.number, address(payoutToken));
 
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalance(distributionId1, investor2, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Automatic);
+        address[] memory computeInvestors = new address[](2);
+        computeInvestors[0] = investor1;
+        computeInvestors[1] = investor2;
+        _moveToPayout(distributionId1, computeInvestors);
 
         // Not funded
         vm.prank(investor1);
-        vm.expectRevert("PayoutsContract: no payout available");
+        vm.expectRevert("PayoutsContract: insufficient funds");
         payouts.claimPayout(distributionId1);
-
-        // Wrong payout method
-        vm.prank(snapshotRole);
-        payouts.setInvestorBalance(distributionId1, investor2, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Automatic);
 
         uint256 fundingAmount = 1000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
@@ -1087,6 +1097,9 @@ contract PayoutsContractTest is Test {
 
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
 
         uint256 fundingAmount = 1000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
@@ -1097,19 +1110,25 @@ contract PayoutsContractTest is Test {
         vm.prank(investor1);
         payouts.claimPayout(distributionId1); // Should succeed
 
-        // Non-whitelisted
+        // Non-whitelisted on a new distribution
+        vm.roll(block.number + 1);
         vm.prank(snapshotRole);
-        payouts.setInvestorBalance(distributionId1, investor2, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
+        distributionId2 = payouts.createDistribution(block.number, address(payoutToken));
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalance(distributionId2, investor2, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
+        address[] memory investor2Only = new address[](1);
+        investor2Only[0] = investor2;
+        _moveToPayout(distributionId2, investor2Only);
 
         uint256 fundingAmount2 = 1000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount2);
         payoutToken.approve(address(payouts), fundingAmount2);
         vm.prank(admin);
-        payouts.fundPayoutToken(distributionId1, fundingAmount2);
+        payouts.fundPayoutToken(distributionId2, fundingAmount2);
 
         vm.prank(investor2);
         vm.expectRevert("PayoutsContract: not whitelisted");
-        payouts.claimPayout(distributionId1);
+        payouts.claimPayout(distributionId2);
     }
 
     // ============ Automatic Distribution Tests ============
@@ -1136,6 +1155,7 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 3000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        _moveToPayout(distributionId1, investors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -1162,12 +1182,12 @@ contract PayoutsContractTest is Test {
 
         uint256 fundingAmount = 1000 ether; // Match snapshot balance for 1:1 payout
         vm.deal(admin, fundingAmount);
-        vm.prank(admin);
-        payouts.fundPayoutToken{value: fundingAmount}(distributionId1, fundingAmount);
-
         address[] memory investors = new address[](1);
         investors[0] = investor1;
 
+        _moveToPayout(distributionId1, investors);
+        vm.prank(admin);
+        payouts.fundPayoutToken{value: fundingAmount}(distributionId1, fundingAmount);
         uint256 balanceBefore = investor1.balance;
         vm.prank(admin);
         payouts.batchDistributeAutomatic(distributionId1, investors);
@@ -1188,6 +1208,9 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 1000 * 10 ** 18; // Match snapshot balance for calculation
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -1226,6 +1249,7 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 3000 * 10 ** 18; // Match total snapshot balance
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        _moveToPayout(distributionId1, investors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -1254,6 +1278,8 @@ contract PayoutsContractTest is Test {
             investors[i] = address(uint160(i + 100));
         }
 
+        address[] memory noInvestors = new address[](0);
+        _moveToPayout(distributionId1, noInvestors);
         vm.prank(admin);
         vm.expectRevert("PayoutsContract: invalid batch size");
         payouts.batchDistributeAutomatic(distributionId1, investors);
@@ -1277,6 +1303,8 @@ contract PayoutsContractTest is Test {
             investors[i] = address(uint160(i + 100));
         }
 
+        address[] memory noInvestors = new address[](0);
+        _moveToPayout(distributionId1, noInvestors);
         vm.prank(admin);
         vm.expectRevert("PayoutsContract: invalid batch size");
         payouts.batchMarkPayoutAsPaid(distributionId1, investors);
@@ -1288,6 +1316,9 @@ contract PayoutsContractTest is Test {
 
         vm.prank(snapshotRole);
         payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
 
         vm.prank(admin);
         vm.expectRevert("PayoutsContract: not set for bank transfer");
@@ -1422,6 +1453,9 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 1000 * 10 ** 18; // Match snapshot balance for 1:1 payout
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -1440,6 +1474,9 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 1000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -1474,6 +1511,7 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 1000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        _moveToPayout(distributionId1, investors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -1492,6 +1530,9 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 1000 * 10 ** 18; // Match snapshot balance for 1:1 payout
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -1658,6 +1699,9 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 1000 * 10 ** 18; // Match snapshot balance for 1:1 payout
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        address[] memory computeInvestors = new address[](1);
+        computeInvestors[0] = investor1;
+        _moveToPayout(distributionId1, computeInvestors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 
@@ -1704,6 +1748,7 @@ contract PayoutsContractTest is Test {
         uint256 fundingAmount = 3000 * 10 ** 18;
         payoutToken.mint(admin, fundingAmount);
         payoutToken.approve(address(payouts), fundingAmount);
+        _moveToPayout(distributionId1, investors);
         vm.prank(admin);
         payouts.fundPayoutToken(distributionId1, fundingAmount);
 

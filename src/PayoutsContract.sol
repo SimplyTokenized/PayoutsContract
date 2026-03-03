@@ -84,8 +84,9 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     // Distribution lifecycle state
     enum DistributionState {
         Setup, // 0 - configuring investors and amounts
-        Payout, // 1 - payouts active
-        Done // 2 - distribution finished
+        Compute, // 1 - pre-computing payout amounts
+        Payout, // 2 - payouts active
+        Done // 3 - distribution finished
     }
 
     // distributionId => investor => payout method preference
@@ -109,8 +110,9 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     );
     event PayoutTokenFunded(uint256 indexed distributionId, uint256 amount);
     event DistributionTotalAmountSet(uint256 indexed distributionId, uint256 amount);
-    event DistributionModeSet(uint256 indexed distributionId, DistributionMode mode);
     event ManualPayoutAmountsSet(uint256 indexed distributionId, address[] investors, uint256[] amounts);
+    event DistributionStateAdvanced(uint256 indexed distributionId, DistributionState state);
+    event PayoutAmountsComputed(uint256 indexed distributionId, address[] investors);
     event PayoutPreferenceSet(uint256 indexed distributionId, address indexed investor, PayoutMethod method);
     event PayoutClaimed(uint256 indexed distributionId, address indexed investor, uint256 amount);
     event PayoutMarkedAsPaid(uint256 indexed distributionId, address indexed investor, uint256 amount);
@@ -153,16 +155,39 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     // ============ Distribution Management ============
 
     /**
-     * @dev Create a new distribution with a snapshot block number and payout token
+     * @dev Create a new distribution in Proportional mode
      * @param _blockNumber Block number to snapshot balances at
      * @param _payoutToken Address of the payout token (address(0) for ETH) - only one token per distribution
      * @return distributionId The ID of the newly created distribution
-     * @notice Each distribution is independent and has its own snapshot block and single payout token
      */
     function createDistribution(uint256 _blockNumber, address _payoutToken)
         external
         onlyRole(SNAPSHOT_ROLE)
         whenNotPaused
+        returns (uint256 distributionId)
+    {
+        return _createDistribution(_blockNumber, _payoutToken, DistributionMode.Proportional);
+    }
+
+    /**
+     * @dev Create a new distribution with a snapshot block number, payout token, and mode
+     * @param _blockNumber Block number to snapshot balances at
+     * @param _payoutToken Address of the payout token (address(0) for ETH) - only one token per distribution
+     * @param _distributionMode Distribution mode for this distribution
+     * @return distributionId The ID of the newly created distribution
+     * @notice Each distribution is independent and has its own snapshot block and single payout token
+     */
+    function createDistribution(uint256 _blockNumber, address _payoutToken, DistributionMode _distributionMode)
+        external
+        onlyRole(SNAPSHOT_ROLE)
+        whenNotPaused
+        returns (uint256 distributionId)
+    {
+        return _createDistribution(_blockNumber, _payoutToken, _distributionMode);
+    }
+
+    function _createDistribution(uint256 _blockNumber, address _payoutToken, DistributionMode _distributionMode)
+        internal
         returns (uint256 distributionId)
     {
         require(_blockNumber > 0 && _blockNumber <= block.number, "PayoutsContract: invalid block number");
@@ -183,7 +208,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             investorCount: 0,
             payoutTokenClaimed: 0,
             totalDistributionAmount: 0,
-            distributionMode: DistributionMode.Proportional,
+            distributionMode: _distributionMode,
             state: DistributionState.Setup
         });
 
@@ -255,6 +280,9 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
 
                 snapshotBalances[distributionId][investor] = balance;
                 payoutPreferences[distributionId][investor] = method;
+                if (dist.distributionMode == DistributionMode.Proportional) {
+                    payoutAmounts[distributionId][investor] = 0;
+                }
 
                 // Add to new method category
                 if (method == PayoutMethod.Claim) {
@@ -342,6 +370,9 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             }
 
             emit InvestorBalanceAdded(distributionId, investor, balance, dist.totalSnapshotBalance);
+            if (dist.distributionMode == DistributionMode.Proportional) {
+                payoutAmounts[distributionId][investor] = 0;
+            }
         } else if (oldBalance > 0) {
             // Remove investor balance (should rarely be needed)
             dist.totalSnapshotBalance -= oldBalance;
@@ -371,7 +402,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
-        require(dist.state == DistributionState.Setup, "PayoutsContract: not in setup");
+        require(dist.state == DistributionState.Payout, "PayoutsContract: not in payout");
 
         address payoutToken = dist.payoutToken;
 
@@ -412,28 +443,6 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     }
 
     /**
-     * @dev Set distribution mode (Proportional or Manual)
-     * @param distributionId The distribution ID
-     * @param mode Distribution mode
-     * @notice Must be set before any payout is processed
-     */
-    function setDistributionMode(uint256 distributionId, DistributionMode mode)
-        external
-        onlyRole(ADMIN_ROLE)
-        whenNotPaused
-    {
-        Distribution storage dist = distributions[distributionId];
-        require(dist.initialized, "PayoutsContract: distribution not found");
-        require(dist.state == DistributionState.Setup, "PayoutsContract: not in setup");
-        require(dist.payoutTokenClaimed == 0, "PayoutsContract: payout already started");
-        require(dist.distributionMode != mode, "PayoutsContract: mode already set");
-
-        dist.distributionMode = mode;
-
-        emit DistributionModeSet(distributionId, mode);
-    }
-
-    /**
      * @dev Set manual payout amounts for investors (Manual mode only)
      * @param distributionId The distribution ID
      * @param investors Array of investor addresses
@@ -459,9 +468,6 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             uint256 amount = amounts[i];
             require(investor != address(0), "PayoutsContract: invalid investor address");
             require(snapshotBalances[distributionId][investor] > 0, "PayoutsContract: not an investor");
-
-            uint256 oldAmount = payoutAmounts[distributionId][investor];
-            PayoutMethod method = payoutPreferences[distributionId][investor];
 
             payoutAmounts[distributionId][investor] = amount;
         }
@@ -501,6 +507,66 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         return requiredAmount;
     }
 
+    /**
+     * @dev Move distribution from Setup to Compute phase
+     * @param distributionId The distribution ID
+     */
+    function startCompute(uint256 distributionId) external onlyRole(ADMIN_ROLE) whenNotPaused {
+        Distribution storage dist = distributions[distributionId];
+        require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Setup, "PayoutsContract: not in setup");
+
+        dist.state = DistributionState.Compute;
+        emit DistributionStateAdvanced(distributionId, DistributionState.Compute);
+    }
+
+    /**
+     * @dev Compute and store payout amounts for investors (Proportional mode only)
+     * @param distributionId The distribution ID
+     * @param investors Array of investor addresses to compute
+     */
+    function computePayoutAmounts(uint256 distributionId, address[] calldata investors)
+        external
+        onlyRole(ADMIN_ROLE)
+        whenNotPaused
+    {
+        Distribution storage dist = distributions[distributionId];
+        require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Compute, "PayoutsContract: not in compute");
+        require(dist.distributionMode == DistributionMode.Proportional, "PayoutsContract: manual mode");
+        require(investors.length > 0 && investors.length <= MAX_BATCH_SIZE, "PayoutsContract: invalid batch size");
+
+        uint256 totalSnapshotBalance = dist.totalSnapshotBalance;
+        uint256 totalPayoutAllocated = dist.totalDistributionAmount;
+        require(totalSnapshotBalance > 0, "PayoutsContract: zero snapshot balance");
+        require(totalPayoutAllocated > 0, "PayoutsContract: total amount not set");
+
+        for (uint256 i = 0; i < investors.length; i++) {
+            address investor = investors[i];
+            require(investor != address(0), "PayoutsContract: invalid investor address");
+            uint256 investorSnapshotBalance = snapshotBalances[distributionId][investor];
+            require(investorSnapshotBalance > 0, "PayoutsContract: not an investor");
+
+            payoutAmounts[distributionId][investor] =
+                (investorSnapshotBalance * totalPayoutAllocated) / totalSnapshotBalance;
+        }
+
+        emit PayoutAmountsComputed(distributionId, investors);
+    }
+
+    /**
+     * @dev Move distribution from Compute to Payout phase
+     * @param distributionId The distribution ID
+     */
+    function finalizeCompute(uint256 distributionId) external onlyRole(ADMIN_ROLE) whenNotPaused {
+        Distribution storage dist = distributions[distributionId];
+        require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Compute, "PayoutsContract: not in compute");
+
+        dist.state = DistributionState.Payout;
+        emit DistributionStateAdvanced(distributionId, DistributionState.Payout);
+    }
+
     // ============ Investor Functions ============
 
     /**
@@ -510,6 +576,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     function claimPayout(uint256 distributionId) external nonReentrant whenNotPaused {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Payout, "PayoutsContract: not in payout");
         require(!requireWhitelist || whitelist[msg.sender], "PayoutsContract: not whitelisted");
         require(
             payoutPreferences[distributionId][msg.sender] == PayoutMethod.Claim, "PayoutsContract: not set for claim"
@@ -517,7 +584,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         require(!paidOut[distributionId][msg.sender], "PayoutsContract: already paid out");
         require(snapshotBalances[distributionId][msg.sender] > 0, "PayoutsContract: not an investor");
 
-        uint256 payoutAmount = _calculatePayoutAmount(distributionId, msg.sender);
+        uint256 payoutAmount = payoutAmounts[distributionId][msg.sender];
         require(payoutAmount > 0, "PayoutsContract: no payout available");
         require(dist.payoutTokenAmount - dist.payoutTokenClaimed >= payoutAmount, "PayoutsContract: insufficient funds");
 
@@ -548,32 +615,6 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
      * @notice Uses totalDistributionAmount as fixed reference for proportional fairness
      * @notice Pure calculation - no state mutation
      */
-    function _calculatePayoutAmount(uint256 distributionId, address investor)
-        internal
-        view
-        returns (uint256 payoutAmount)
-    {
-        Distribution storage dist = distributions[distributionId];
-
-        if (dist.distributionMode == DistributionMode.Manual) {
-            return payoutAmounts[distributionId][investor];
-        }
-
-        if (dist.totalSnapshotBalance == 0) {
-            return 0;
-        }
-
-        uint256 investorSnapshotBalance = snapshotBalances[distributionId][investor];
-        // If totalDistributionAmount is not set, fall back to funded amount for backward compatibility.
-        uint256 totalPayoutAllocated =
-            dist.totalDistributionAmount > 0 ? dist.totalDistributionAmount : dist.payoutTokenAmount;
-
-        // Calculate proportional payout: (investor_balance / total_snapshot_balance) * total_payout
-        payoutAmount = (investorSnapshotBalance * totalPayoutAllocated) / dist.totalSnapshotBalance;
-
-        return payoutAmount;
-    }
-
     /**
      * @dev Get payout amount for an investor (view function)
      * @param distributionId The distribution ID
@@ -588,7 +629,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             return 0;
         }
 
-        return _calculatePayoutAmount(distributionId, investor);
+        return payoutAmounts[distributionId][investor];
     }
 
     // ============ Admin Functions ============
@@ -604,6 +645,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     function markPayoutAsPaid(uint256 distributionId, address investor) external onlyRole(ADMIN_ROLE) whenNotPaused {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Payout, "PayoutsContract: not in payout");
         require(snapshotBalances[distributionId][investor] > 0, "PayoutsContract: not an investor");
         require(
             payoutPreferences[distributionId][investor] == PayoutMethod.Bank,
@@ -611,7 +653,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         );
         require(!paidOut[distributionId][investor], "PayoutsContract: already paid out");
 
-        uint256 payoutAmount = _calculatePayoutAmount(distributionId, investor);
+        uint256 payoutAmount = payoutAmounts[distributionId][investor];
         require(payoutAmount > 0, "PayoutsContract: no payout available");
 
         // Mark as paid out (no funds deducted since bank transfer is off-chain)
@@ -634,6 +676,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Payout, "PayoutsContract: not in payout");
         require(investors.length > 0 && investors.length <= MAX_BATCH_SIZE, "PayoutsContract: invalid batch size");
 
         for (uint256 i = 0; i < investors.length; i++) {
@@ -643,7 +686,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
                     && payoutPreferences[distributionId][investor] == PayoutMethod.Bank
                     && !paidOut[distributionId][investor]
             ) {
-                uint256 payoutAmount = _calculatePayoutAmount(distributionId, investor);
+                uint256 payoutAmount = payoutAmounts[distributionId][investor];
                 if (payoutAmount > 0) {
                     paidOut[distributionId][investor] = true;
                     emit PayoutMarkedAsPaid(distributionId, investor, payoutAmount);
@@ -667,6 +710,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
     {
         Distribution storage dist = distributions[distributionId];
         require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Payout, "PayoutsContract: not in payout");
         require(investors.length > 0 && investors.length <= MAX_BATCH_SIZE, "PayoutsContract: invalid batch size");
 
         address payoutToken = dist.payoutToken;
@@ -678,7 +722,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
                     && payoutPreferences[distributionId][investor] == PayoutMethod.Automatic
                     && !paidOut[distributionId][investor]
             ) {
-                uint256 payoutAmount = _calculatePayoutAmount(distributionId, investor);
+                uint256 payoutAmount = payoutAmounts[distributionId][investor];
                 if (payoutAmount > 0 && dist.payoutTokenAmount - dist.payoutTokenClaimed >= payoutAmount) {
                     // Mark as paid out before transfer (reentrancy protection)
                     paidOut[distributionId][investor] = true;
@@ -838,6 +882,9 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         if (!dist.initialized) {
             return (false, 0);
         }
+        if (dist.state != DistributionState.Payout) {
+            return (false, 0);
+        }
 
         if (
             snapshotBalances[distributionId][investor] == 0
@@ -847,7 +894,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             return (false, 0);
         }
 
-        payoutAmount = _calculatePayoutAmount(distributionId, investor);
+        payoutAmount = payoutAmounts[distributionId][investor];
         canClaim = payoutAmount > 0 && (dist.payoutTokenAmount - dist.payoutTokenClaimed) >= payoutAmount;
     }
 

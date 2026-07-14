@@ -2,7 +2,7 @@
 pragma solidity 0.8.27;
 
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "./ReentrancyGuardUpgradeable.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -23,7 +23,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  * @notice IMPORTANT: This contract does NOT support fee-on-transfer tokens as payout tokens.
  * @notice Balances are typically calculated off-chain and set on-chain in batches to avoid gas/timeout issues.
  */
-contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
+contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyGuardTransient, PausableUpgradeable {
     using SafeERC20 for IERC20;
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
@@ -133,7 +133,6 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
      */
     function initialize(address _baseToken, address _admin) public initializer {
         __AccessControl_init();
-        __ReentrancyGuard_init();
         __Pausable_init();
 
         require(_baseToken != address(0), "PayoutsContract: invalid base token");

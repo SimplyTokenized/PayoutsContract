@@ -40,7 +40,12 @@ transfer), and scalable batch operations.
 - **Multiple independent distributions** — each with its own snapshot block and single payout token (ERC20 or ETH).
 - **Optional whitelisting** — enforced across all payout methods when enabled.
 - **Scalable batches** — up to `MAX_BATCH_SIZE` (200) entries per call.
-- **Pausable** and **reentrancy-protected**, with role-based access control and `SafeERC20` transfers.
+- **Pausable** and **reentrancy-protected** (OpenZeppelin `ReentrancyGuardTransient`, EIP-1153 transient storage), with role-based access control and `SafeERC20` transfers.
+
+> **Chain requirement:** because reentrancy protection uses transient storage
+> (EIP-1153), the contract must be deployed on a **Cancun-capable chain**
+> (Ethereum mainnet/Sepolia, Avalanche C-Chain/Fuji, and major L2s all qualify).
+> Local builds and tests target `cancun` via `foundry.toml`.
 
 ## Architecture
 
@@ -50,7 +55,12 @@ The contract is deployed behind an OpenZeppelin **transparent proxy**:
 - **Proxy** — holds state and delegates calls to the implementation; this is the address users interact with.
 - **ProxyAdmin** — a separate contract that controls upgrades. Its **owner** is set at deployment and is the sole upgrade authority. This is distinct from the on-chain roles below.
 
-Built on OpenZeppelin Contracts / Contracts-Upgradeable `5.5.0`, Solidity `0.8.27`.
+Reentrancy protection is provided by OpenZeppelin's **`ReentrancyGuardTransient`**,
+which keeps its guard flag in a fixed EIP-1153 transient slot and holds **zero
+persistent storage** — it can never collide with or shift the contract's storage
+layout, the safest option for an upgradeable contract.
+
+Built on OpenZeppelin Contracts / Contracts-Upgradeable `5.5.0`, Solidity `0.8.27`, EVM version `cancun`.
 
 ## Distribution Lifecycle
 
@@ -272,7 +282,7 @@ place `ADMIN_ROLE` / the ProxyAdmin owner behind a multisig and/or timelock.
 ## Security
 
 - Checks-effects-interactions ordering on every fund-moving path; `paidOut` set before transfer.
-- `nonReentrant` on `claimPayout` and `batchDistributeAutomatic`.
+- `nonReentrant` (OpenZeppelin `ReentrancyGuardTransient`, EIP-1153) on `claimPayout` and `batchDistributeAutomatic`; requires a Cancun-capable chain.
 - `SafeERC20` for all token transfers; explicit `msg.value` handling for ETH.
 - Role-based access control and pausability.
 - Optional whitelist enforced across **all** payout methods.

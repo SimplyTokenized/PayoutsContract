@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Regression test suite covering batch balance corrections, whitelist
   enforcement on all payout paths, and the `Done` lifecycle transition.
 
+### Changed
+- **Reentrancy protection now uses OpenZeppelin `ReentrancyGuardTransient`**
+  (EIP-1153 transient storage) instead of the hand-maintained local
+  `ReentrancyGuardUpgradeable`. The transient guard holds zero persistent
+  storage, so it cannot shift or collide with contract storage. The local guard
+  file was removed and the build/tests now target the `cancun` EVM version.
+  **Deployment requires a Cancun-capable chain.**
+
 ### Fixed
 - **Batch balance corrections no longer revert (arithmetic underflow).**
   `setInvestorBalances` previously accumulated a running unsigned delta that
@@ -26,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `requireWhitelist` was enabled. All payout paths now honor the whitelist.
 
 ### Removed
+- Local `src/ReentrancyGuardUpgradeable.sol` copy (replaced by OpenZeppelin's
+  `ReentrancyGuardTransient`).
 - Redundant no-op self-assignments of `payoutAmounts` in `claimPayout` and
   `batchDistributeAutomatic`.
 

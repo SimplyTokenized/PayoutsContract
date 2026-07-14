@@ -53,6 +53,11 @@ Operators integrating this contract should understand the following:
   allocations depends on the honesty and accuracy of the `SNAPSHOT_ROLE`
   operator's off-chain computation.
 - **Fee-on-transfer and rebasing tokens are not supported** as payout tokens.
+- **A Cancun-capable chain is required.** Reentrancy protection uses OpenZeppelin's
+  `ReentrancyGuardTransient` (EIP-1153 transient storage). Deploying to a chain
+  without EIP-1153 support will cause `nonReentrant` functions to behave
+  incorrectly. All current target chains (Ethereum mainnet/Sepolia, Avalanche
+  C-Chain/Fuji, and major L2s) support it.
 
 ## Best Practices for Deployment
 

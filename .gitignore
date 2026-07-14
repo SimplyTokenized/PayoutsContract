@@ -10,5 +10,14 @@ out/
 # Docs
 docs/
 
-# Dotenv file
+# Dotenv file (keep .env.example tracked)
 .env
+.env.local
+.env.*.local
+
+# OS / editor cruft
+.DS_Store
+**/.DS_Store
+*.swp
+.idea/
+.vscode/

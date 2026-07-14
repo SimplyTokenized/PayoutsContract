@@ -242,8 +242,6 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         require(investors.length == methods.length, "PayoutsContract: investors and methods length mismatch");
         require(investors.length > 0 && investors.length <= MAX_BATCH_SIZE, "PayoutsContract: invalid batch size");
 
-        uint256 balanceDelta = 0;
-
         for (uint256 i = 0; i < investors.length; i++) {
             address investor = investors[i];
             uint256 balance = balances[i];
@@ -272,10 +270,10 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
                     // New investor in this distribution
                     isInvestor[distributionId][investor] = true;
                     dist.investorCount++;
-                    balanceDelta += balance;
+                    dist.totalSnapshotBalance += balance;
                 } else {
-                    // Update existing investor - adjust delta
-                    balanceDelta = balanceDelta + balance - oldBalance;
+                    // Update existing investor - adjust total (may increase or decrease)
+                    dist.totalSnapshotBalance = dist.totalSnapshotBalance + balance - oldBalance;
                 }
 
                 snapshotBalances[distributionId][investor] = balance;
@@ -296,16 +294,11 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
                 // Remove investor balance (should rarely be needed)
                 isInvestor[distributionId][investor] = false;
                 dist.investorCount--;
-                balanceDelta -= oldBalance;
+                dist.totalSnapshotBalance -= oldBalance;
                 snapshotBalances[distributionId][investor] = 0;
                 payoutPreferences[distributionId][investor] = PayoutMethod.None;
                 payoutAmounts[distributionId][investor] = 0;
             }
-        }
-
-        // Update total snapshot balance
-        if (balanceDelta != 0) {
-            dist.totalSnapshotBalance = dist.totalSnapshotBalance + balanceDelta;
         }
 
         emit InvestorBalancesSet(distributionId, investors, balances, dist.totalSnapshotBalance);
@@ -567,6 +560,21 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         emit DistributionStateAdvanced(distributionId, DistributionState.Payout);
     }
 
+    /**
+     * @dev Mark a distribution as finished, moving it from Payout to Done
+     * @param distributionId The distribution ID
+     * @notice Once Done, no further payouts, claims, or bank markings can be processed
+     * @notice Any remaining unclaimed funds can still be recovered via emergencyWithdraw
+     */
+    function finalizeDistribution(uint256 distributionId) external onlyRole(ADMIN_ROLE) whenNotPaused {
+        Distribution storage dist = distributions[distributionId];
+        require(dist.initialized, "PayoutsContract: distribution not found");
+        require(dist.state == DistributionState.Payout, "PayoutsContract: not in payout");
+
+        dist.state = DistributionState.Done;
+        emit DistributionStateAdvanced(distributionId, DistributionState.Done);
+    }
+
     // ============ Investor Functions ============
 
     /**
@@ -590,7 +598,6 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
 
         // Mark as paid out before transfer (reentrancy protection)
         paidOut[distributionId][msg.sender] = true;
-        payoutAmounts[distributionId][msg.sender] = payoutAmount;
         dist.payoutTokenClaimed += payoutAmount;
 
         // Transfer payout
@@ -647,6 +654,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
         require(dist.initialized, "PayoutsContract: distribution not found");
         require(dist.state == DistributionState.Payout, "PayoutsContract: not in payout");
         require(snapshotBalances[distributionId][investor] > 0, "PayoutsContract: not an investor");
+        require(!requireWhitelist || whitelist[investor], "PayoutsContract: not whitelisted");
         require(
             payoutPreferences[distributionId][investor] == PayoutMethod.Bank,
             "PayoutsContract: not set for bank transfer"
@@ -684,7 +692,7 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             if (
                 snapshotBalances[distributionId][investor] > 0
                     && payoutPreferences[distributionId][investor] == PayoutMethod.Bank
-                    && !paidOut[distributionId][investor]
+                    && !paidOut[distributionId][investor] && (!requireWhitelist || whitelist[investor])
             ) {
                 uint256 payoutAmount = payoutAmounts[distributionId][investor];
                 if (payoutAmount > 0) {
@@ -720,13 +728,12 @@ contract PayoutsContract is Initializable, AccessControlUpgradeable, ReentrancyG
             if (
                 snapshotBalances[distributionId][investor] > 0
                     && payoutPreferences[distributionId][investor] == PayoutMethod.Automatic
-                    && !paidOut[distributionId][investor]
+                    && !paidOut[distributionId][investor] && (!requireWhitelist || whitelist[investor])
             ) {
                 uint256 payoutAmount = payoutAmounts[distributionId][investor];
                 if (payoutAmount > 0 && dist.payoutTokenAmount - dist.payoutTokenClaimed >= payoutAmount) {
                     // Mark as paid out before transfer (reentrancy protection)
                     paidOut[distributionId][investor] = true;
-                    payoutAmounts[distributionId][investor] = payoutAmount;
                     dist.payoutTokenClaimed += payoutAmount;
 
                     // Transfer payout

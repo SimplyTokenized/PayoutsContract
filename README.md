@@ -1,391 +1,313 @@
-# Payouts Contract
+# PayoutsContract
 
-An upgradeable smart contract for distributing payouts to investors based on historical token balances at specific block numbers. Features multiple independent distributions, flexible payout methods (claim, automatic, or bank transfer), and scalable batch operations.
+[![CI](https://github.com/SimplyTokenized/PayoutsContract/actions/workflows/test.yml/badge.svg)](https://github.com/SimplyTokenized/PayoutsContract/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Solidity](https://img.shields.io/badge/Solidity-0.8.27-363636.svg)](https://soliditylang.org/)
+[![Built with Foundry](https://img.shields.io/badge/Built%20with-Foundry-FFDB1C.svg)](https://getfoundry.sh/)
 
-## ✨ Features
+An upgradeable smart contract for distributing payouts to investors based on
+historical token balances captured at specific block numbers. It supports
+multiple independent distributions, proportional or manual allocation, three
+payout methods (on-chain claim, on-chain automatic, and off-chain bank
+transfer), and scalable batch operations.
 
-- ✅ **Proxy Contract Support** - Fully upgradeable using OpenZeppelin's transparent proxy pattern
-- 📸 **Snapshot-Based** - Takes snapshots of base token balances at specific block numbers
-- 💰 **Single Payout Token per Distribution** - Each distribution uses one payout token (ERC20 or ETH)
-- 📊 **Proportional Payouts** - Calculates payouts based on investor's share of total snapshot balance
-- 🎯 **Flexible Payout Methods** - Three options: Claim (on-chain), Automatic (on-chain), or Bank (off-chain)
-- 🔄 **Multiple Independent Distributions** - Create multiple payout distributions, each with its own snapshot
-- 📋 **Optional Whitelisting** - Enable/disable whitelist requirement for payouts
-- ⚡ **Scalable Batch Operations** - Supports 10,000+ investors via batch operations (up to 200 per call)
-- ⏸️ **Pausable** - Admin can pause/unpause operations
-- 🔒 **Access Control** - Role-based access control for admin functions
-- 🛡️ **Reentrancy Protection** - Protected against reentrancy attacks
-- ⚡ **O(1) Funding Calculation** - Efficient required funding calculation without iteration
+> ⚠️ **Not yet audited.** An independent third-party audit is recommended before
+> mainnet deployment. See [`SECURITY.md`](SECURITY.md).
 
-## 🏗️ Architecture
+## Table of Contents
 
-The contract uses OpenZeppelin's transparent proxy pattern:
-- **Implementation Contract**: Contains the actual logic
-- **Proxy Contract**: Points to the implementation and stores state
-- **Proxy Admin**: Controls upgrades (has `DEFAULT_ADMIN_ROLE`)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Distribution Lifecycle](#distribution-lifecycle)
+- [Quick Start](#quick-start)
+- [Usage Walkthrough](#usage-walkthrough)
+- [Payout Calculation](#payout-calculation)
+- [Roles & Access Control](#roles--access-control)
+- [API Reference](#api-reference)
+- [Upgradeability](#upgradeability)
+- [Security](#security)
+- [Testing](#testing)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
-## 🚀 Quick Start
+## Features
+
+- **Upgradeable** — OpenZeppelin transparent proxy pattern; state persists across upgrades.
+- **Snapshot-based** — allocations derived from base-token balances at a chosen block.
+- **Two allocation modes** — `Proportional` (share of snapshot) or `Manual` (exact admin-set amounts).
+- **Three payout methods** — `Claim` (investor pulls), `Automatic` (admin pushes on-chain), `Bank` (off-chain, marked on-chain).
+- **Multiple independent distributions** — each with its own snapshot block and single payout token (ERC20 or ETH).
+- **Optional whitelisting** — enforced across all payout methods when enabled.
+- **Scalable batches** — up to `MAX_BATCH_SIZE` (200) entries per call.
+- **Pausable** and **reentrancy-protected**, with role-based access control and `SafeERC20` transfers.
+
+## Architecture
+
+The contract is deployed behind an OpenZeppelin **transparent proxy**:
+
+- **Implementation** — holds the logic (`src/PayoutsContract.sol`).
+- **Proxy** — holds state and delegates calls to the implementation; this is the address users interact with.
+- **ProxyAdmin** — a separate contract that controls upgrades. Its **owner** is set at deployment and is the sole upgrade authority. This is distinct from the on-chain roles below.
+
+Built on OpenZeppelin Contracts / Contracts-Upgradeable `5.5.0`, Solidity `0.8.27`.
+
+## Distribution Lifecycle
+
+Each distribution advances through four states. Payout functions only work in the `Payout` state.
+
+```
+Setup ──▶ Compute ──▶ Payout ──▶ Done
+  │          │           │          │
+  │          │           │          └─ finalizeDistribution()  (no further payouts)
+  │          │           └───────────  fund + claim / auto / bank
+  │          └───────────────────────  startCompute() → computePayoutAmounts() → finalizeCompute()
+  └──────────────────────────────────  createDistribution() → set balances / amounts
+```
+
+| State | What happens | How to advance |
+| ----- | ------------ | -------------- |
+| `Setup` | Configure investor balances, methods, and the total/manual amounts. | `startCompute()` |
+| `Compute` | Pre-compute per-investor payout amounts (Proportional only; Manual skips computation). | `finalizeCompute()` |
+| `Payout` | Fund the contract and process claims, automatic distributions, and bank markings. | `finalizeDistribution()` |
+| `Done` | Terminal. No further payouts; residual funds recoverable via `emergencyWithdraw`. | — |
+
+## Quick Start
 
 ### Prerequisites
 
-1. Install dependencies:
+- [Foundry](https://book.getfoundry.sh/getting-started/installation)
+- Node.js 20+ (for the npm script wrappers)
+
+### Install
+
 ```bash
-npm run install:deps
-# Or manually:
-forge install OpenZeppelin/openzeppelin-contracts-upgradeable OpenZeppelin/openzeppelin-foundry-upgrades OpenZeppelin/openzeppelin-contracts
+git clone https://github.com/SimplyTokenized/PayoutsContract.git
+cd PayoutsContract
+npm run setup      # installs library submodules via forge
 ```
 
-2. Set up environment variables in `.env`:
+### Configure
+
 ```bash
-BASE_TOKEN=<address_of_base_token>  # The ERC20 token used for snapshots
-ADMIN=<admin_address>
+cp .env.example .env
+# then edit .env — at minimum set BASE_TOKEN and ADMIN
 ```
 
-### Build
+### Build & Test
 
 ```bash
 npm run build
-```
-
-### Test
-
-```bash
-# Run all tests
-npm run test
-
-# Run with gas report
-npm run test:gas
-
-# Run with verbose output
-npm run test:verbose
+forge clean && npm test    # clean build required for OZ upgrade-safety validation
 ```
 
 ### Deploy
 
 ```bash
-# Local deployment
-npm run deploy:local
-
-# Testnet deployment
-npm run deploy:testnet
+npm run deploy:local       # Anvil (uses a well-known local test key)
+npm run deploy:sepolia     # Ethereum Sepolia
+npm run deploy:fuji        # Avalanche Fuji
+npm run deploy:testnet     # generic testnet via $TESTNET_RPC
 ```
 
-## 📖 Contract Functions
+## Usage Walkthrough
 
-### Distribution Management
-
-#### Create Distribution
-- `createDistribution(uint256 blockNumber, address payoutToken)` - Create a new distribution with a snapshot block number and payout token (address(0) for ETH)
-  - **Role**: `SNAPSHOT_ROLE`
-  - **Returns**: `distributionId`
-
-### Snapshot Functions
-
-#### Set Investor Balances
-- `setInvestorBalances(uint256 distributionId, address[] investors, uint256[] balances, PayoutMethod[] methods)` - Set investor balances and payout methods in batch (up to 200 investors)
-  - **Role**: `SNAPSHOT_ROLE`
-  - **Note**: Balances should be calculated off-chain using archive node or indexer
-
-- `setInvestorBalance(uint256 distributionId, address investor, uint256 balance, PayoutMethod method)` - Set a single investor balance and payout method
-  - **Role**: `SNAPSHOT_ROLE`
-  - **Note**: Useful for individual updates or small additions
-
-### Payout Token Management
-
-#### Fund Distribution
-- `fundPayoutToken(uint256 distributionId, uint256 amount)` - Fund a distribution with payout tokens (ERC20 or ETH)
-  - **Role**: `ADMIN_ROLE`
-  - **Note**: Only fund amounts for Claim and Automatic investors (exclude Bank investors)
-  - **Payable**: Yes (when funding with ETH)
-
-- `getRequiredFundingAmount(uint256 distributionId, uint256 totalPayoutAmount)` - Calculate required funding amount excluding bank transfer investors
-  - **View Function**
-  - **Returns**: Amount needed for Claim and Automatic investors only (O(1) calculation)
-
-### Investor Functions
-
-#### Claim Payout
-- `claimPayout(uint256 distributionId)` - Claim payout directly (for investors who chose Claim method)
-  - **Public Function**
-  - **Note**: Requires whitelist if `requireWhitelist` is true
-  - **Note**: Investor must have `PayoutMethod.Claim` preference
-
-### Admin Functions
-
-#### Automatic Distribution
-- `batchDistributeAutomatic(uint256 distributionId, address[] investors)` - Batch distribute payouts to investors with Automatic preference
-  - **Role**: `ADMIN_ROLE`
-  - **Note**: Processes up to 200 investors per call
-  - **Note**: Automatically sends payouts on-chain
-
-#### Bank Transfer Management
-- `markPayoutAsPaid(uint256 distributionId, address investor)` - Mark investor as paid out via bank transfer
-  - **Role**: `ADMIN_ROLE`
-  - **Note**: Bank investors receive payouts off-chain, so no funds are deducted
-
-- `batchMarkPayoutAsPaid(uint256 distributionId, address[] investors)` - Batch mark multiple investors as paid out via bank transfer
-  - **Role**: `ADMIN_ROLE`
-  - **Note**: Processes up to 200 investors per call
-
-#### Whitelist Management
-- `addToWhitelist(address account)` - Add address to whitelist
-  - **Role**: `WHITELIST_ROLE`
-
-- `removeFromWhitelist(address account)` - Remove address from whitelist
-  - **Role**: `WHITELIST_ROLE`
-
-- `batchAddToWhitelist(address[] accounts)` - Batch add addresses to whitelist
-  - **Role**: `WHITELIST_ROLE`
-  - **Note**: Processes up to 200 addresses per call
-
-- `batchRemoveFromWhitelist(address[] accounts)` - Batch remove addresses from whitelist
-  - **Role**: `WHITELIST_ROLE`
-  - **Note**: Processes up to 200 addresses per call
-
-- `updateWhitelistRequirement(bool requireWhitelist)` - Enable/disable whitelist requirement for payouts
-  - **Role**: `ADMIN_ROLE`
-
-#### Emergency Functions
-- `emergencyWithdraw(address token, address to, uint256 amount)` - Emergency withdrawal of tokens or ETH
-  - **Role**: `ADMIN_ROLE`
-  - **Note**: Use with extreme caution - can withdraw any token or ETH from contract
-
-- `pause()` - Pause all contract operations
-  - **Role**: `ADMIN_ROLE`
-
-- `unpause()` - Unpause contract operations
-  - **Role**: `ADMIN_ROLE`
-
-### View Functions
-
-- `getDistribution(uint256 distributionId)` - Get distribution details
-  - **Returns**: `(distributionId, snapshotBlockNumber, totalSnapshotBalance, payoutToken, payoutTokenAmount, claimBalance, automaticBalance, bankBalance, initialized, investorCount)`
-
-- `getPayoutAmount(uint256 distributionId, address investor)` - Get payout amount for an investor
-  - **Returns**: `payoutAmount`
-
-- `getInvestorCount(uint256 distributionId)` - Get number of investors in a distribution
-  - **Returns**: `count`
-
-- `canClaimPayout(uint256 distributionId, address investor)` - Check if investor can claim payout
-  - **Returns**: `(bool canClaim, string reason)`
-
-- `snapshotBalances(uint256 distributionId, address investor)` - Get investor's snapshot balance
-- `payoutPreferences(uint256 distributionId, address investor)` - Get investor's payout method preference
-- `paidOut(uint256 distributionId, address investor)` - Check if investor has been paid out
-- `isInvestor(uint256 distributionId, address investor)` - Check if address is an investor in a distribution
-- `whitelist(address account)` - Check if address is whitelisted
-- `requireWhitelist()` - Check if whitelist is required
-
-## 🔐 Roles
-
-| Role | Description |
-|------|-------------|
-| `DEFAULT_ADMIN_ROLE` | Full admin access, can upgrade contract |
-| `ADMIN_ROLE` | Can manage distributions, fund payouts, batch operations, whitelist requirement, pause/unpause |
-| `SNAPSHOT_ROLE` | Can create distributions and set investor balances |
-| `WHITELIST_ROLE` | Can add/remove addresses from whitelist |
-
-## 📝 Setup Process
-
-### 1. Deploy Contract
-
-Deploy the PayoutsContract using the deployment script:
-
-```bash
-npm run deploy:local
-```
-
-### 2. Create Distribution
-
-Create a new distribution with a snapshot block number and payout token:
+### Proportional distribution (typical)
 
 ```solidity
-// Example: Snapshot at block 1000000, payouts in USDC
-uint256 distributionId = payouts.createDistribution(1000000, usdcAddress);
+// 1. Create a distribution: snapshot at block 1_000_000, payouts in USDC.
+uint256 id = payouts.createDistribution(1_000_000, usdcAddress);
+// (Pass address(0) as the token to pay out in ETH.)
 
-// Example: Snapshot at block 1000000, payouts in ETH
-uint256 distributionId = payouts.createDistribution(1000000, address(0));
-```
-
-### 3. Set Investor Balances
-
-Set investor balances and payout methods (calculated off-chain):
-
-```solidity
-address[] memory investors = [investor1, investor2, investor3];
-uint256[] memory balances = [1000 * 10**18, 2000 * 10**18, 3000 * 10**18];
-PayoutMethod[] memory methods = [PayoutMethod.Claim, PayoutMethod.Automatic, PayoutMethod.Bank];
-
-payouts.setInvestorBalances(distributionId, investors, balances, methods);
-```
-
-### 4. Calculate and Fund Distribution
-
-Calculate required funding (excluding bank investors) and fund the distribution:
-
-```solidity
-uint256 totalPayoutAmount = 100000 * 10**18; // Total payout for all investors
-uint256 requiredAmount = payouts.getRequiredFundingAmount(distributionId, totalPayoutAmount);
-
-// Fund with ERC20 token
-usdc.approve(address(payouts), requiredAmount);
-payouts.fundPayoutToken(distributionId, requiredAmount);
-
-// Or fund with ETH
-payouts.fundPayoutToken{value: requiredAmount}(distributionId, requiredAmount);
-```
-
-### 5. Process Payouts
-
-#### For Claim Method Investors
-Investors claim directly:
-```solidity
-payouts.claimPayout(distributionId);
-```
-
-#### For Automatic Method Investors
-Admin triggers batch distribution:
-```solidity
-address[] memory automaticInvestors = [investor2, investor4];
-payouts.batchDistributeAutomatic(distributionId, automaticInvestors);
-```
-
-#### For Bank Method Investors
-Admin marks as paid after off-chain transfer:
-```solidity
-payouts.markPayoutAsPaid(distributionId, investor3);
-// Or batch:
-address[] memory bankInvestors = [investor3, investor5];
-payouts.batchMarkPayoutAsPaid(distributionId, bankInvestors);
-```
-
-## 💡 Example Usage
-
-### Complete Workflow
-
-```solidity
-// 1. Create distribution
-uint256 distributionId = payouts.createDistribution(1000000, usdcAddress);
-
-// 2. Set investor balances (off-chain calculated)
+// 2. Set investor snapshot balances and their chosen payout methods.
 address[] memory investors = [alice, bob, charlie];
-uint256[] memory balances = [1000 * 10**18, 2000 * 10**18, 3000 * 10**18];
-PayoutMethod[] memory methods = [
-    PayoutMethod.Claim,      // Alice claims directly
-    PayoutMethod.Automatic,  // Bob receives automatic distribution
-    PayoutMethod.Bank        // Charlie receives bank transfer
+uint256[] memory balances  = [uint256(1000e18), 2000e18, 3000e18];
+PayoutsContract.PayoutMethod[] memory methods = [
+    PayoutsContract.PayoutMethod.Claim,      // Alice pulls
+    PayoutsContract.PayoutMethod.Automatic,  // Bob is pushed on-chain
+    PayoutsContract.PayoutMethod.Bank        // Charlie is paid off-chain
 ];
-payouts.setInvestorBalances(distributionId, investors, balances, methods);
+payouts.setInvestorBalances(id, investors, balances, methods);
 
-// 3. Calculate and fund
-uint256 totalPayout = 6000 * 10**6; // 6000 USDC total
-uint256 required = payouts.getRequiredFundingAmount(distributionId, totalPayout);
-// required = 3000 * 10**6 (only Alice + Bob, excluding Charlie)
+// 3. Set the full intended distribution amount (Claim + Automatic + Bank).
+payouts.setDistributionTotalAmount(id, 6000e6); // e.g. 6000 USDC
+
+// 4. Compute per-investor amounts (batched), then finalize into Payout.
+payouts.startCompute(id);
+payouts.computePayoutAmounts(id, investors);   // up to 200 per call
+payouts.finalizeCompute(id);
+
+// 5. Fund ONLY the on-chain portion (Claim + Automatic; excludes Bank).
+uint256 required = payouts.getRequiredFundingAmount(id); // O(1), excludes Bank
 usdc.approve(address(payouts), required);
-payouts.fundPayoutToken(distributionId, required);
+payouts.fundPayoutToken(id, required);
+// For ETH distributions: payouts.fundPayoutToken{value: required}(id, required);
 
-// 4. Process payouts
-// Alice claims
-payouts.claimPayout(distributionId); // From Alice's address
+// 6. Process payouts.
+payouts.claimPayout(id);                         // called by Alice
+payouts.batchDistributeAutomatic(id, [bob]);     // admin pushes to Bob
+payouts.markPayoutAsPaid(id, charlie);           // admin marks Charlie paid off-chain
 
-// Bob receives automatic
-payouts.batchDistributeAutomatic(distributionId, [bob]);
-
-// Charlie marked as paid (after bank transfer)
-payouts.markPayoutAsPaid(distributionId, charlie);
+// 7. Close the distribution.
+payouts.finalizeDistribution(id);
 ```
 
-### Check Payout Amount
+### Manual distribution (exact amounts)
 
 ```solidity
-uint256 payout = payouts.getPayoutAmount(distributionId, alice);
-// Returns: 1000 * 10**6 (proportional to Alice's snapshot balance)
+// 1. Create in Manual mode.
+uint256 id = payouts.createDistribution(
+    1_000_000, usdcAddress, PayoutsContract.DistributionMode.Manual
+);
+
+// 2. Set balances/methods (balances still gate eligibility & method categories).
+payouts.setInvestorBalances(id, investors, balances, methods);
+
+// 3. Set exact per-investor payout amounts (no proportional computation).
+payouts.setManualPayoutAmounts(id, investors, exactAmounts);
+
+// 4. Advance to Payout (computePayoutAmounts is NOT used in Manual mode).
+payouts.startCompute(id);
+payouts.finalizeCompute(id);
+
+// 5. Fund the on-chain portion, then process payouts as above.
+//    In Manual mode, compute required funding off-chain from the per-investor
+//    amounts of Claim + Automatic investors (getRequiredFundingAmount reverts
+//    in Manual mode).
+
+// 6. payouts.finalizeDistribution(id);
 ```
 
-### Check Distribution Status
+## Payout Calculation
 
-```solidity
-(
-    uint256 id,
-    uint256 blockNumber,
-    uint256 totalBalance,
-    address token,
-    uint256 funded,
-    uint256 claimBalance,
-    uint256 automaticBalance,
-    uint256 bankBalance,
-    bool initialized,
-    uint256 count
-) = payouts.getDistribution(distributionId);
+In **Proportional** mode, each investor's amount is their share of the snapshot
+applied to the full intended distribution amount:
+
+```
+payoutAmount = (investorSnapshotBalance * totalDistributionAmount) / totalSnapshotBalance
 ```
 
-## 📊 Payout Calculation
+Integer division truncates, so the sum of per-investor amounts never exceeds
+`totalDistributionAmount`. `getRequiredFundingAmount` returns the aggregate for
+`Claim + Automatic` investors only — `Bank` investors are paid off-chain and are
+never funded on-chain.
 
-Payouts are calculated proportionally based on snapshot balances:
+**Example** — total snapshot 6000 tokens, total distribution 6000 USDC:
 
-### Formula
-```
-payoutAmount = (investorSnapshotBalance / totalSnapshotBalance) * payoutTokenAmount
-```
+| Investor | Snapshot | Method | On-chain payout |
+| -------- | -------- | ------ | --------------- |
+| Alice    | 1000     | Claim     | 1000 USDC |
+| Bob      | 2000     | Automatic | 2000 USDC |
+| Charlie  | 3000     | Bank      | 3000 USDC (off-chain) |
 
-### Example
+Required on-chain funding here is **3000 USDC** (Alice + Bob only).
 
-**Distribution Setup:**
-- Total snapshot balance: 6000 tokens
-- Total payout amount: 6000 USDC (funded)
+## Roles & Access Control
 
-**Investor Balances:**
-- Alice: 1000 tokens → 1000 USDC
-- Bob: 2000 tokens → 2000 USDC
-- Charlie: 3000 tokens → 3000 USDC
+| Role | Capabilities |
+| ---- | ------------ |
+| `DEFAULT_ADMIN_ROLE` | Root role admin — grants and revokes all roles. |
+| `ADMIN_ROLE` | Manage distribution amounts, compute/finalize, fund, batch payouts, whitelist requirement, pause/unpause, emergency withdraw. |
+| `SNAPSHOT_ROLE` | Create distributions and set investor balances/methods. |
+| `WHITELIST_ROLE` | Add/remove addresses from the whitelist. |
 
-**Note**: If only Alice and Bob are Claim/Automatic (Charlie is Bank), then:
-- Required funding: 3000 USDC (only for Alice + Bob)
-- Charlie receives bank transfer off-chain (not funded on-chain)
+> **Upgrade authority is not a role.** Contract upgrades are controlled by the
+> **ProxyAdmin owner** set at deployment, independently of the roles above.
 
-## ⚠️ Important Notes
+All four roles are granted to the `_admin` address at initialization. For
+production, split them across dedicated operational and treasury accounts and
+place `ADMIN_ROLE` / the ProxyAdmin owner behind a multisig and/or timelock.
 
-1. **Snapshot Block**: Must be a past block number (cannot be future)
-2. **Payout Token**: Each distribution uses ONE payout token (ERC20 or ETH via address(0))
-3. **Funding**: Only fund amounts for Claim and Automatic investors (exclude Bank investors)
-4. **Bank Transfers**: Bank method investors receive payouts off-chain; no funds deducted from contract
-5. **Batch Size**: Maximum 200 investors per batch operation to avoid gas/timeout issues
-6. **Fee-on-Transfer Tokens**: NOT supported as payout tokens
-7. **Whitelist**: Optional and disabled by default
-8. **Proportional Payouts**: Each claim/distribution reduces available `payoutTokenAmount`, affecting subsequent calculations
+## API Reference
 
-## 🔄 Upgradeability
+### Distribution management
+- `createDistribution(uint256 blockNumber, address payoutToken) → uint256` — Proportional mode. *(SNAPSHOT_ROLE)*
+- `createDistribution(uint256 blockNumber, address payoutToken, DistributionMode mode) → uint256` *(SNAPSHOT_ROLE)*
 
-The contract uses OpenZeppelin's transparent proxy pattern:
-- **Proxy Address**: Remains constant (this is the address users interact with)
-- **Implementation**: Can be upgraded by `DEFAULT_ADMIN_ROLE`
-- **State**: Stored in proxy, persists across upgrades
+### Snapshot configuration *(state: Setup)*
+- `setInvestorBalances(uint256 id, address[] investors, uint256[] balances, PayoutMethod[] methods)` *(SNAPSHOT_ROLE)*
+- `setInvestorBalance(uint256 id, address investor, uint256 balance, PayoutMethod method)` *(SNAPSHOT_ROLE)*
 
-## ⚠️ Security Considerations
+### Amounts & funding
+- `setDistributionTotalAmount(uint256 id, uint256 amount)` — Proportional only, set once, state Setup. *(ADMIN_ROLE)*
+- `setManualPayoutAmounts(uint256 id, address[] investors, uint256[] amounts)` — Manual only, state Setup. *(ADMIN_ROLE)*
+- `getRequiredFundingAmount(uint256 id) → uint256` — view, Proportional only (reverts in Manual mode).
+- `fundPayoutToken(uint256 id, uint256 amount)` — payable; state Payout. *(ADMIN_ROLE)*
 
-- ✅ **Reentrancy Protection**: All payout functions use `nonReentrant` modifier
-- ✅ **Access Control**: Admin functions protected with role checks
-- ✅ **Pausable**: Can pause operations in emergencies
-- ✅ **Whitelist**: Optional additional security layer
-- ✅ **SafeERC20**: Uses SafeERC20 for token transfers
-- ✅ **Input Validation**: All inputs are validated
-- ✅ **Emergency Withdraw**: Admin can recover funds in emergencies (use with caution)
+### Compute pipeline
+- `startCompute(uint256 id)` — Setup → Compute. *(ADMIN_ROLE)*
+- `computePayoutAmounts(uint256 id, address[] investors)` — Proportional only, state Compute. *(ADMIN_ROLE)*
+- `finalizeCompute(uint256 id)` — Compute → Payout. *(ADMIN_ROLE)*
+- `finalizeDistribution(uint256 id)` — Payout → Done. *(ADMIN_ROLE)*
 
-## 📚 Documentation
+### Payouts *(state: Payout)*
+- `claimPayout(uint256 id)` — investor pulls their Claim payout. *(public, nonReentrant)*
+- `batchDistributeAutomatic(uint256 id, address[] investors)` — push to Automatic investors. *(ADMIN_ROLE, nonReentrant)*
+- `markPayoutAsPaid(uint256 id, address investor)` — mark a Bank investor paid off-chain. *(ADMIN_ROLE)*
+- `batchMarkPayoutAsPaid(uint256 id, address[] investors)` *(ADMIN_ROLE)*
 
-Auto-generated API documentation from NatSpec comments is available in the `docs/` directory. Generate it with:
+### Whitelist
+- `updateWhitelistRequirement(bool requireWhitelist)` *(ADMIN_ROLE)*
+- `addToWhitelist(address)` / `removeFromWhitelist(address)` *(WHITELIST_ROLE)*
+- `batchAddToWhitelist(address[])` / `batchRemoveFromWhitelist(address[])` *(WHITELIST_ROLE)*
+
+### Emergency & lifecycle
+- `emergencyWithdraw(address token, address to, uint256 amount)` — withdraw any token/ETH held by the contract. *(ADMIN_ROLE)*
+- `pause()` / `unpause()` *(ADMIN_ROLE)*
+
+### Views
+- `getDistribution(uint256 id) → Distribution` — full distribution struct.
+- `getPayoutAmount(uint256 id, address investor) → uint256`
+- `getInvestorCount(uint256 id) → uint256`
+- `canClaimPayout(uint256 id, address investor) → (bool canClaim, uint256 payoutAmount)`
+- Public mappings/vars: `distributions`, `snapshotBalances`, `isInvestor`, `payoutPreferences`, `paidOut`, `payoutAmounts`, `whitelist`, `requireWhitelist`, `baseToken`, `nextDistributionId`, and the role/`MAX_BATCH_SIZE` constants.
+
+## Upgradeability
+
+- The **proxy address is stable** — always interact with it, not the implementation.
+- **Upgrades** are performed by the ProxyAdmin owner using OpenZeppelin's upgrade tooling.
+- **Storage layout is append-only.** Never reorder, remove, or retype existing
+  state variables; the CI suite runs OpenZeppelin's upgrade-safety validation.
+
+## Security
+
+- Checks-effects-interactions ordering on every fund-moving path; `paidOut` set before transfer.
+- `nonReentrant` on `claimPayout` and `batchDistributeAutomatic`.
+- `SafeERC20` for all token transfers; explicit `msg.value` handling for ETH.
+- Role-based access control and pausability.
+- Optional whitelist enforced across **all** payout methods.
+
+**Trust assumptions and known operational risks** (privileged roles,
+`emergencyWithdraw` scope, off-chain snapshot correctness, unsupported
+fee-on-transfer tokens) are documented in [`SECURITY.md`](SECURITY.md). Report
+vulnerabilities privately per that policy.
+
+## Testing
 
 ```bash
-npm run docgen
+forge clean && forge test        # full suite (clean build required)
+npm run test:gas                 # with gas report
+npm run test:verbose             # verbose traces
 ```
 
-Or generate and serve it locally (opens in browser automatically):
+> The OpenZeppelin upgrade-safety validator requires a full compilation. If you
+> see "Build info file … is not from a full compilation", run `forge clean`
+> first. CI already performs a clean build.
+
+## Documentation
+
+Auto-generated API docs from NatSpec:
 
 ```bash
-npm run docgen:serve
+npm run docgen         # writes to docs/
+npm run docgen:serve   # build and serve locally
 ```
 
-## 📄 License
+## Contributing
 
-MIT
+Contributions are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup,
+coding standards, and the PR process.
+
+## License
+
+Released under the [MIT License](LICENSE).

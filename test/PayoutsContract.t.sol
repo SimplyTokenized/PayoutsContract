@@ -45,6 +45,7 @@ contract PayoutsContractTest is Test {
     event ManualPayoutAmountsSet(uint256 indexed distributionId, address[] investors, uint256[] amounts);
     event PayoutClaimed(uint256 indexed distributionId, address indexed investor, uint256 amount);
     event PayoutMarkedAsPaid(uint256 indexed distributionId, address indexed investor, uint256 amount);
+    event DistributionStateAdvanced(uint256 indexed distributionId, PayoutsContract.DistributionState state);
     event WhitelistRequirementUpdated(bool requireWhitelist);
     event WhitelistAdded(address indexed account);
     event WhitelistRemoved(address indexed account);
@@ -1777,5 +1778,191 @@ contract PayoutsContractTest is Test {
         // Investor1 got 1000, Investor2 got 2000. Total on-chain distributed: 3000
         // Remaining in contract: 3000 - 3000 = 0 (Bank investor paid off-chain)
         assertEq(payoutToken.balanceOf(address(payouts)), 0);
+    }
+
+    // Lowering an existing investor's balance within setInvestorBalances must not underflow.
+    function test_Regression_SetInvestorBalances_DecreaseExisting() public {
+        vm.prank(snapshotRole);
+        distributionId1 = payouts.createDistribution(block.number, address(0));
+
+        address[] memory investors = new address[](1);
+        uint256[] memory balances = new uint256[](1);
+        PayoutsContract.PayoutMethod[] memory methods = new PayoutsContract.PayoutMethod[](1);
+        investors[0] = investor1;
+        balances[0] = 1000 * 10 ** 18;
+        methods[0] = PayoutsContract.PayoutMethod.Claim;
+
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalances(distributionId1, investors, balances, methods);
+        assertEq(payouts.getDistribution(distributionId1).totalSnapshotBalance, 1000 * 10 ** 18);
+
+        // Correct the balance downward: 1000 -> 400 (previously reverted with arithmetic underflow)
+        balances[0] = 400 * 10 ** 18;
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalances(distributionId1, investors, balances, methods);
+
+        PayoutsContract.Distribution memory dist = payouts.getDistribution(distributionId1);
+        assertEq(dist.totalSnapshotBalance, 400 * 10 ** 18);
+        assertEq(dist.claimBalance, 400 * 10 ** 18);
+        assertEq(payouts.snapshotBalances(distributionId1, investor1), 400 * 10 ** 18);
+    }
+
+    // Removing an investor (balance -> 0) within setInvestorBalances must not underflow.
+    function test_Regression_SetInvestorBalances_RemoveExisting() public {
+        vm.prank(snapshotRole);
+        distributionId1 = payouts.createDistribution(block.number, address(0));
+
+        address[] memory investors = new address[](2);
+        uint256[] memory balances = new uint256[](2);
+        PayoutsContract.PayoutMethod[] memory methods = new PayoutsContract.PayoutMethod[](2);
+        investors[0] = investor1;
+        investors[1] = investor2;
+        balances[0] = 1000 * 10 ** 18;
+        balances[1] = 500 * 10 ** 18;
+        methods[0] = PayoutsContract.PayoutMethod.Claim;
+        methods[1] = PayoutsContract.PayoutMethod.Automatic;
+
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalances(distributionId1, investors, balances, methods);
+        assertEq(payouts.getDistribution(distributionId1).investorCount, 2);
+
+        // Remove investor1 by setting balance to 0 (previously reverted with arithmetic underflow)
+        address[] memory removeInv = new address[](1);
+        uint256[] memory removeBal = new uint256[](1);
+        PayoutsContract.PayoutMethod[] memory removeMethod = new PayoutsContract.PayoutMethod[](1);
+        removeInv[0] = investor1;
+        removeBal[0] = 0;
+        removeMethod[0] = PayoutsContract.PayoutMethod.Claim;
+
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalances(distributionId1, removeInv, removeBal, removeMethod);
+
+        PayoutsContract.Distribution memory dist = payouts.getDistribution(distributionId1);
+        assertEq(dist.totalSnapshotBalance, 500 * 10 ** 18);
+        assertEq(dist.investorCount, 1);
+        assertEq(dist.claimBalance, 0);
+        assertFalse(payouts.isInvestor(distributionId1, investor1));
+    }
+
+    // ============ Regression: M1 - whitelist enforced on automatic & bank payouts ============
+
+    // batchDistributeAutomatic must skip non-whitelisted investors when whitelist is required.
+    function test_Regression_AutomaticRespectsWhitelist() public {
+        vm.prank(admin);
+        payouts.updateWhitelistRequirement(true);
+
+        vm.prank(snapshotRole);
+        distributionId1 = payouts.createDistribution(block.number, address(0));
+
+        address[] memory investors = new address[](1);
+        investors[0] = investor2; // deliberately NOT whitelisted
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalance(distributionId1, investor2, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Automatic);
+
+        _moveToPayout(distributionId1, investors);
+
+        vm.deal(admin, 1000 * 10 ** 18);
+        vm.prank(admin);
+        payouts.fundPayoutToken{value: 1000 * 10 ** 18}(distributionId1, 1000 * 10 ** 18);
+
+        uint256 beforeBal = investor2.balance;
+        vm.prank(admin);
+        payouts.batchDistributeAutomatic(distributionId1, investors);
+
+        // Non-whitelisted investor must NOT be paid and must remain unpaid/claimable later
+        assertEq(investor2.balance, beforeBal, "non-whitelisted investor was paid");
+        assertFalse(payouts.paidOut(distributionId1, investor2));
+
+        // Once whitelisted, the automatic payout goes through
+        vm.prank(admin);
+        payouts.addToWhitelist(investor2);
+        vm.prank(admin);
+        payouts.batchDistributeAutomatic(distributionId1, investors);
+        assertEq(investor2.balance, beforeBal + 1000 * 10 ** 18);
+        assertTrue(payouts.paidOut(distributionId1, investor2));
+    }
+
+    // markPayoutAsPaid must revert for a non-whitelisted bank investor when whitelist is required.
+    function test_Regression_MarkPaidRespectsWhitelist() public {
+        vm.prank(admin);
+        payouts.updateWhitelistRequirement(true);
+
+        vm.prank(snapshotRole);
+        distributionId1 = payouts.createDistribution(block.number, address(0));
+
+        address[] memory investors = new address[](1);
+        investors[0] = investor3; // NOT whitelisted
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalance(distributionId1, investor3, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Bank);
+
+        _moveToPayout(distributionId1, investors);
+
+        vm.prank(admin);
+        vm.expectRevert("PayoutsContract: not whitelisted");
+        payouts.markPayoutAsPaid(distributionId1, investor3);
+
+        // batch variant silently skips the non-whitelisted investor
+        vm.prank(admin);
+        payouts.batchMarkPayoutAsPaid(distributionId1, investors);
+        assertFalse(payouts.paidOut(distributionId1, investor3));
+
+        // After whitelisting, marking succeeds
+        vm.prank(admin);
+        payouts.addToWhitelist(investor3);
+        vm.prank(admin);
+        payouts.markPayoutAsPaid(distributionId1, investor3);
+        assertTrue(payouts.paidOut(distributionId1, investor3));
+    }
+
+    // ============ Regression: L1 - Done lifecycle state ============
+
+    // finalizeDistribution moves Payout -> Done and closes all payout paths.
+    function test_Regression_FinalizeDistribution() public {
+        vm.prank(snapshotRole);
+        distributionId1 = payouts.createDistribution(block.number, address(0));
+
+        address[] memory investors = new address[](1);
+        investors[0] = investor1;
+        vm.prank(snapshotRole);
+        payouts.setInvestorBalance(distributionId1, investor1, 1000 * 10 ** 18, PayoutsContract.PayoutMethod.Claim);
+        _moveToPayout(distributionId1, investors);
+
+        vm.deal(admin, 1000 * 10 ** 18);
+        vm.prank(admin);
+        payouts.fundPayoutToken{value: 1000 * 10 ** 18}(distributionId1, 1000 * 10 ** 18);
+
+        // Finalize: Payout -> Done
+        vm.prank(admin);
+        vm.expectEmit(true, false, false, true);
+        emit DistributionStateAdvanced(distributionId1, PayoutsContract.DistributionState.Done);
+        payouts.finalizeDistribution(distributionId1);
+
+        assertEq(
+            uint256(payouts.getDistribution(distributionId1).state), uint256(PayoutsContract.DistributionState.Done)
+        );
+
+        // Once Done, claims are rejected (state must be Payout)
+        vm.prank(investor1);
+        vm.expectRevert("PayoutsContract: not in payout");
+        payouts.claimPayout(distributionId1);
+    }
+
+    function test_Regression_FinalizeDistribution_OnlyFromPayout() public {
+        vm.prank(snapshotRole);
+        distributionId1 = payouts.createDistribution(block.number, address(0));
+
+        // Still in Setup -> cannot finalize
+        vm.prank(admin);
+        vm.expectRevert("PayoutsContract: not in payout");
+        payouts.finalizeDistribution(distributionId1);
+    }
+
+    function test_Regression_FinalizeDistribution_Unauthorized() public {
+        vm.prank(snapshotRole);
+        distributionId1 = payouts.createDistribution(block.number, address(0));
+
+        vm.prank(investor1);
+        vm.expectRevert();
+        payouts.finalizeDistribution(distributionId1);
     }
 }

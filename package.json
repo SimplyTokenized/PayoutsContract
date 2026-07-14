@@ -2,7 +2,16 @@
   "name": "payouts-contract",
   "version": "1.0.0",
   "description": "PayoutsContract - An upgradeable contract for distributing payouts to investors based on historical token balances",
-  "main": "index.js",
+  "license": "MIT",
+  "author": "SimplyTokenized",
+  "homepage": "https://github.com/SimplyTokenized/PayoutsContract#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SimplyTokenized/PayoutsContract.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SimplyTokenized/PayoutsContract/issues"
+  },
   "scripts": {
     "setup": "forge install OpenZeppelin/openzeppelin-contracts-upgradeable OpenZeppelin/openzeppelin-foundry-upgrades OpenZeppelin/openzeppelin-contracts --no-commit",
     "build": "forge build",
@@ -36,8 +45,6 @@
     "investor",
     "snapshot"
   ],
-  "author": "",
-  "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.0.0"
   }

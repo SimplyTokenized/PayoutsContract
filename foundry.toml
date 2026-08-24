@@ -2,14 +2,75 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+test = "test"
+script = "script"
+
+# EIP-1153 transient storage, used by ReentrancyGuardTransient.
 evm_version = "cancun"
+solc_version = "0.8.27"
+
+# `ast` and `build_info` are required by the OpenZeppelin Upgrades plugin, which
+# validates upgrade safety from a *full* compilation. After an incremental
+# rebuild it refuses to run, which is why the npm scripts clean before testing.
 ast = true
-ffi = true
 build_info = true
 extra_output = ["storageLayout"]
+ffi = true
+
 optimizer = true
-optimizer_runs = 1
+# ~19.6KB against the 24KB limit. Tuned for the cost of *running* the contract —
+# which recipients pay when they claim — as far as the remaining headroom allows;
+# past this the curve flattens and only the size grows.
+optimizer_runs = 500
 via_ir = true
+
 fs_permissions = [{ access = "read-write", path = "." }]
+
+[profile.default.fuzz]
+runs = 256
+
+[profile.default.invariant]
+runs = 256
+depth = 500
+fail_on_revert = false
+
+# Used by CI. Same build, more search: a pull request is where it is cheap to
+# spend minutes finding what 256 runs would not.
+[profile.ci]
+verbosity = 3
+
+[profile.ci.fuzz]
+runs = 1000
+
+[profile.ci.invariant]
+runs = 500
+depth = 500
+fail_on_revert = false
+
+# Fast feedback while writing code; never the profile that gates a merge.
+[profile.lite]
+optimizer = false
+via_ir = false
+
+[profile.lite.fuzz]
+runs = 32
+
+[profile.lite.invariant]
+runs = 16
+depth = 100
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+quote_style = "double"
+number_underscore = "preserve"
+multiline_func_header = "attributes_first"
+sort_imports = false
+
+[doc]
+out = "docs"
+title = "PayoutsContract"
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

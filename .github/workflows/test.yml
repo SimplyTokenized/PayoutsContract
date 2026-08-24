@@ -7,13 +7,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   FOUNDRY_PROFILE: ci
 
 jobs:
   check:
-    name: Foundry project
+    name: Build, lint and test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -25,14 +30,64 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
+      # The OpenZeppelin Upgrades plugin shells out to Node during tests to
+      # validate upgrade safety, so a runtime has to be present.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Show Forge version
         run: forge --version
 
-      - name: Run Forge fmt
+      - name: Check formatting
         run: forge fmt --check
 
-      - name: Run Forge build
+      - name: Lint
+        run: forge lint
+
+      # A full (non-incremental) build: the upgrade-safety validator rejects
+      # build info produced by a partial recompile.
+      - name: Build
         run: forge build --sizes
 
-      - name: Run Forge tests
-        run: forge test -vvv
+      - name: Test
+        run: forge test
+
+      - name: Gas report
+        run: forge test --gas-report > gas-report.txt || true
+
+      - name: Upload gas report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gas-report
+          path: gas-report.txt
+          if-no-files-found: ignore
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Coverage summary
+        run: forge coverage --no-match-coverage '(test|script)' --report summary --report lcov
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+          if-no-files-found: ignore

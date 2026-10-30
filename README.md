@@ -5,25 +5,31 @@
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.27-363636.svg)](https://soliditylang.org/)
 [![Built with Foundry](https://img.shields.io/badge/Built%20with-Foundry-FFDB1C.svg)](https://getfoundry.sh/)
 
-An upgradeable smart contract for distributing payouts to investors based on
-historical token balances captured at specific block numbers. It supports
-multiple independent distributions, proportional or manual allocation, three
-payout methods (on-chain claim, on-chain automatic, and off-chain bank
-transfer), and scalable batch operations.
+**One upgradeable payout contract per tenant.** Each payout run becomes one
+on-chain *distribution*: a list of `(recipient, amount)` entries and the money to
+cover them. Recipients either collect what they are owed, or the operator sends
+it to them — the tenant decides which, per run.
 
-> ⚠️ **Not yet audited.** An independent third-party audit is recommended before
-> mainnet deployment. See [`SECURITY.md`](SECURITY.md).
+> ⚠️ **Not audited.** An independent audit covering 2.x is a precondition for
+> handling real money. See [`SECURITY.md`](SECURITY.md).
+
+> **Upgrading from 1.x?** There is no upgrade path — the storage layout and most
+> of the API changed. 2.0.0 is deployed fresh; 1.x instances keep serving their
+> own distributions. See [`CHANGELOG.md`](CHANGELOG.md) for the full diff.
 
 ## Table of Contents
 
-- [Features](#features)
-- [Architecture](#architecture)
-- [Distribution Lifecycle](#distribution-lifecycle)
-- [Quick Start](#quick-start)
-- [Usage Walkthrough](#usage-walkthrough)
-- [Payout Calculation](#payout-calculation)
-- [Roles & Access Control](#roles--access-control)
-- [API Reference](#api-reference)
+- [What it does](#what-it-does)
+- [What it does not do](#what-it-does-not-do)
+- [How the list gets on-chain](#how-the-list-gets-on-chain)
+- [Compliance](#compliance)
+- [Distribution lifecycle](#distribution-lifecycle)
+- [The two guarantees](#the-two-guarantees)
+- [Quick start](#quick-start)
+- [Walkthrough](#walkthrough)
+- [Who pays the gas](#who-pays-the-gas)
+- [Roles](#roles)
+- [API reference](#api-reference)
 - [Upgradeability](#upgradeability)
 - [Security](#security)
 - [Testing](#testing)
@@ -31,293 +37,434 @@ transfer), and scalable batch operations.
 - [Contributing](#contributing)
 - [License](#license)
 
-## Features
+## What it does
 
-- **Upgradeable** — OpenZeppelin transparent proxy pattern; state persists across upgrades.
-- **Snapshot-based** — allocations derived from base-token balances at a chosen block.
-- **Two allocation modes** — `Proportional` (share of snapshot) or `Manual` (exact admin-set amounts).
-- **Three payout methods** — `Claim` (investor pulls), `Automatic` (admin pushes on-chain), `Bank` (off-chain, marked on-chain).
-- **Multiple independent distributions** — each with its own snapshot block and single payout token (ERC20 or ETH).
-- **Optional whitelisting** — enforced across all payout methods when enabled.
-- **Scalable batches** — up to `MAX_BATCH_SIZE` (200) entries per call.
-- **Pausable** and **reentrancy-protected** (OpenZeppelin `ReentrancyGuardTransient`, EIP-1153 transient storage), with role-based access control and `SafeERC20` transfers.
+- **One contract per tenant, many runs.** The payout asset is chosen per
+  distribution, so one deployment covers every offering and every token the
+  tenant pays in — ERC-20 or the chain's native asset.
+- **A distribution is a payout run**, carrying a `runRef` that ties it back to
+  the run that produced it. The list reaches the chain one of two ways — entry
+  by entry, or as a single Merkle root for a list of any size. See
+  [How the list gets on-chain](#how-the-list-gets-on-chain).
+- **Claim or send, chosen per run.** `Claim` means recipients collect it
+  themselves — one funding transaction instead of one transfer per person, which
+  is what makes a list of two thousand feasible. `Auto` means the operator pushes
+  it, in any subset: one row, one page, or the whole list.
+- **Settled elsewhere is recorded too.** `markPayoutAsPaid` writes the receipt
+  for a payment made another way (a bank transfer) without moving funds here.
+- **Expiry and sweep.** Money nobody collects can be returned to the tenant after
+  a stated date — and only after it.
+- **Governance in code.** Duties split across four roles (operator ≠ funder ≠
+  guardian ≠ approver), and every irreversible action — going live, sweeping,
+  withdrawing surplus, changing the forwarder — is a propose/approve pair where
+  the approver must be a different person. See [Governance](#roles).
+- **Compliance is pluggable, per distribution.** No gate, an operator-kept
+  whitelist, or an ERC-3643 adapter that lets the security token's own identity
+  registry decide — checked when money moves, failing closed. See
+  [Compliance](#compliance).
+- **Gas is selectable.** Recipients pay their own claim gas by default; setting
+  an ERC-2771 forwarder lets a relayer pay instead.
+- **Pausable**, **reentrancy-protected** (`ReentrancyGuardTransient`, EIP-1153),
+  role-gated, and `SafeERC20` throughout.
 
-> **Chain requirement:** because reentrancy protection uses transient storage
-> (EIP-1153), the contract must be deployed on a **Cancun-capable chain**
-> (Ethereum mainnet/Sepolia, Avalanche C-Chain/Fuji, and major L2s all qualify).
-> Local builds and tests target `cancun` via `foundry.toml`.
+> **Chain requirement:** transient-storage reentrancy protection (EIP-1153) means
+> a **Cancun-capable chain** — Ethereum mainnet/Sepolia, Avalanche C-Chain/Fuji
+> and the major L2s all qualify. Builds and tests target `cancun`.
 
-## Architecture
+## What it does not do
 
-The contract is deployed behind an OpenZeppelin **transparent proxy**:
+Deliberate omissions, because each one is handled better elsewhere:
 
-- **Implementation** — holds the logic (`src/PayoutsContract.sol`).
-- **Proxy** — holds state and delegates calls to the implementation; this is the address users interact with.
-- **ProxyAdmin** — a separate contract that controls upgrades. Its **owner** is set at deployment and is the sole upgrade authority. This is distinct from the on-chain roles below.
+- **It does not compute what anyone is owed.** Amounts are supplied by the
+  caller. A payout run works out each recipient's gross, deductions and net
+  off-chain, where the tax rules live; the contract enforces the arithmetic
+  around those amounts, not the amounts themselves.
+- **It does not snapshot balances.** v1 did, and derived amounts proportionally.
+  That formula stops being the authority the moment any per-recipient
+  withholding exists, so it is gone.
+- **It does not keep its own compliance list.** An entry with an amount *is*
+  the entitlement; when a distribution needs an on-chain gate, it names one —
+  see [Compliance](#compliance) — rather than the payout contract keeping a
+  second copy of somebody else's facts.
+- **It does not mint.** Funding is a transfer in; the tokens must already exist.
 
-Reentrancy protection is provided by OpenZeppelin's **`ReentrancyGuardTransient`**,
-which keeps its guard flag in a fixed EIP-1153 transient slot and holds **zero
-persistent storage** — it can never collide with or shift the contract's storage
-layout, the safest option for an upgradeable contract.
-
-Built on OpenZeppelin Contracts / Contracts-Upgradeable `5.5.0`, Solidity `0.8.27`, EVM version `cancun`.
-
-## Distribution Lifecycle
-
-Each distribution advances through four states. Payout functions only work in the `Payout` state.
+## Distribution lifecycle
 
 ```
-Setup ──▶ Compute ──▶ Payout ──▶ Done
-  │          │           │          │
-  │          │           │          └─ finalizeDistribution()  (no further payouts)
-  │          │           └───────────  fund + claim / auto / bank
-  │          └───────────────────────  startCompute() → computePayoutAmounts() → finalizeCompute()
-  └──────────────────────────────────  createDistribution() → set balances / amounts
+    createDistribution (mode, entryMode, expiry, runRef, eligibility registry)
+                |
+                v
+         +-------------+  Direct: setPayoutAmounts (batches of <=200)
+         |    Setup    |  Merkle: propose + approveSetMerkleRoot (four eyes)
+         +-------------+  both:   fundPayoutToken (FUNDER, up to totalOwed)
+                |
+                |  propose + approveFinalizeDistribution   -- four eyes,
+                v                                             funded == totalOwed
+         +-------------+   claimPayout([amount, proof])  (Claim mode, recipient)
+         |   Payout    |   batchDistributeAutomatic      (Auto mode, operator)
+         +-------------+   markPayoutAsPaid              (settled off-chain)
+                |
+                |  closeDistribution                (nothing left reserved)
+                |  propose + approveSweepUnclaimed  (four eyes, after expiry)
+                v
+         +-------------+
+         |    Done     |
+         +-------------+
 ```
 
-| State | What happens | How to advance |
-| ----- | ------------ | -------------- |
-| `Setup` | Configure investor balances, methods, and the total/manual amounts. | `startCompute()` |
-| `Compute` | Pre-compute per-investor payout amounts (Proportional only; Manual skips computation). | `finalizeCompute()` |
-| `Payout` | Fund the contract and process claims, automatic distributions, and bank markings. | `finalizeDistribution()` |
-| `Done` | Terminal. No further payouts; residual funds recoverable via `emergencyWithdraw`. | — |
+## How the list gets on-chain
 
-## Quick Start
+Chosen per distribution at creation, immutable afterwards.
 
-### Prerequisites
+| | `Direct` | `Merkle` | `Code` |
+|---|---|---|---|
+| Committed to | Each recipient, one storage entry | The whole list, one root | Redeemable **codes**, one root |
+| Recipients known… | at funding | at funding | **only when someone redeems** |
+| `totalOwed` | **Computed** from the entries | **Declared**, checked by the approver | **Declared** (the campaign budget) |
+| Amounts | On-chain, self-sufficient | Off-chain — the list must stay published | Off-chain, per code |
+| Paying | Claim **or** push | **Claim only** | **Redeem only** |
+| Good for | Up to a few thousand recipients | Tens of thousands and up | Giveaways |
 
-- [Foundry](https://book.getfoundry.sh/getting-started/installation)
-- Node.js 20+ (for the npm script wrappers)
+**Direct** is the default and is what most runs should use: everything is on-chain,
+nothing external has to survive, and the funding guarantee is airtight because the
+contract sums the entries itself.
 
-### Install
+**Merkle** exists for the case Direct cannot reach. Commit the root with
+`proposeSetMerkleRoot` / `approveSetMerkleRoot`, fund it, take it live; recipients then
+call `claimPayout(id, amount, proof)`. Leaves are
+`keccak256(bytes.concat(keccak256(abi.encode(recipient, amount))))` — the double-hashed
+form [OpenZeppelin's `merkle-tree`](https://github.com/OpenZeppelin/merkle-tree) library
+produces, which is what stops an internal node being replayed as a forged leaf.
+
+> ⚠️ **Two obligations come with Merkle mode.**
+>
+> 1. **The list must stay published** (your API, S3, IPFS) for as long as anyone can
+>    claim. Lose it and nobody can build a proof. The file is *verifiable*, not trusted —
+>    anyone can recompute the root and compare — so a compromised host can withhold a
+>    proof but never forge one.
+> 2. **`totalOwed` is an assertion, not a sum.** The contract cannot add up leaves it
+>    cannot see, so under-declaring the total leaves the last claimants facing an empty
+>    reserve. That is precisely why committing a root takes four eyes: **the approver's
+>    job is to recompute the root *and* the total from the published list before
+>    approving.** `MerkleRootSet` records the root, the total and the leaf count, so the
+>    check stays reproducible by anyone afterwards.
+>
+> The reserve invariant holds either way — a mis-declared total can strand a claimant,
+> but it can never overspend a run or touch another run's money.
+
+### `Code` — giveaways, where the recipients are not known yet
+
+A giveaway inverts the usual order: you fund a campaign budget, hand out codes, and only
+learn who is being paid when somebody redeems one. `Code` mode commits the tree to the
+**codes** instead of to people. Whoever holds a code names the address it should pay.
+
+```solidity
+// The operator: commit the codes and prefund the budget. Nobody is named.
+payouts.proposeSetMerkleRoot(id, codeRoot, campaignBudget, codeCount);
+payouts.approveSetMerkleRoot(id, codeRoot, campaignBudget, codeCount);
+payouts.fundPayoutToken(id, campaignBudget);
+// ...propose + approveFinalizeDistribution...
+
+// The holder: sign the address you want paid, and redeem.
+bytes32 digest = payouts.codeRedemptionDigest(id, receiver);   // sign with the CODE's key
+payouts.claimWithCode(id, amount, receiver, proof, signature);
+```
+
+**A code is a private key, not a password** — the redemption link carries the secret, and
+the tree commits to the address derived from it. That is not decoration; it is the only
+shape that survives contact with a public mempool:
+
+> ⚠️ If a code were a secret *string* passed in calldata, the first bot to see a
+> redemption would copy it into a higher-gas transaction and take the money. Because the
+> holder instead **signs the receiving address**, a signature lifted from the mempool
+> pays the person it already names. There is no ordering of those transactions in which
+> the thief is paid — `test_frontRunnerCannotStealARedemption` asserts exactly this.
+
+Consequences worth knowing:
+
+- **Anyone may submit the transaction**, so the platform can pay gas for a recipient who
+  has none. The signature, not the sender, decides who is paid.
+- **A code is spent once** — `paidOut` is keyed by the code, so one person may hold
+  several codes and one wallet may receive from all of them.
+- **Unredeemed budget comes back** on the sweep after expiry, which is the normal end of
+  a campaign since most codes are never redeemed. Set an expiry.
+- **A giveaway can still be compliance-gated**: the code proves entitlement, the
+  registry proves the person may be paid at all.
+
+## Compliance
+
+One mechanism, three postures. A distribution names its gate at creation —
+immutable for its life — and `claimPayout` / `batchDistributeAutomatic` refuse
+anyone the gate does not vouch for, **at payment time** (a verification revoked
+between entry and claim blocks the claim) and **failing closed** (an
+unreachable registry blocks payment rather than waving it through).
+
+| Registry | Posture | For whom |
+|---|---|---|
+| `address(0)` | No gate — the operator-curated entry list is the entitlement | Platforms whose KYC lives off-chain, in the process that writes the entries |
+| [`WhitelistRegistry`](src/compliance/WhitelistRegistry.sol) | An on-chain list the tenant keeps, shared by every distribution that names it | Tenants who want an on-chain record of eligibility they control |
+| [`ERC3643EligibilityAdapter`](src/compliance/ERC3643EligibilityAdapter.sol) | The security token's **own identity registry** decides (`isVerified`), followed through registry swaps | Regulated issuers — eligibility is enforced by an independent compliance layer, not by the payer attesting twice |
+
+Anything implementing
+[`IEligibilityRegistry`](src/compliance/IEligibilityRegistry.sol) —
+`isEligible(address) → bool` — can stand behind a distribution.
+`markPayoutAsPaid` is ungated on purpose: it moves no funds here, and the
+off-chain settlement it records carries its own compliance.
+
+## The two guarantees
+
+Two properties are enforced on-chain rather than trusted to the caller. They are
+the reason a single contract can safely hold a tenant's entire payout history.
+
+**1. A distribution cannot go live under-funded.** `finalizeDistribution`
+requires `funded == totalOwed`. Once recipients are told they can claim, the
+money for every one of them is already in the contract. (In 1.x, funding
+correctness lived entirely off-chain.)
+
+**2. One run can never spend another run's money.** Every distribution's unspent
+balance is *reserved* — tracked per distribution and summed per asset in
+`reservedByToken`. `emergencyWithdraw` is limited to the surplus above it, so
+even the emergency path cannot touch money owed to someone. Money becomes
+surplus only when a recipient is settled off-chain, when a distribution is swept
+after expiry, or when tokens arrive without going through `fundPayoutToken`.
+
+Both are covered by stateful invariant tests (`test/Reserve.t.sol`).
+
+## Quick start
 
 ```bash
 git clone https://github.com/SimplyTokenized/PayoutsContract.git
 cd PayoutsContract
-npm run setup      # installs library submodules via forge
+forge install
+npm test          # clean build + full suite
 ```
 
-### Configure
+`npm test` cleans before building on purpose: the OpenZeppelin Upgrades plugin
+validates upgrade safety from a **full** compilation and refuses to run against
+build info produced by an incremental rebuild.
+
+Deploy locally:
 
 ```bash
-cp .env.example .env
-# then edit .env — at minimum set BASE_TOKEN and ADMIN
+npm run anvil     # in another terminal
+ADMIN=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 npm run deploy:local
 ```
 
-### Build & Test
+Deployment environment variables:
 
-```bash
-npm run build
-forge clean && npm test    # clean build required for OZ upgrade-safety validation
-```
+| Variable | Meaning |
+|---|---|
+| `ADMIN` | Operates payouts and manages roles (required) |
+| `PROXY_ADMIN_OWNER` | Upgrade authority; defaults to `ADMIN` |
+| `TRUSTED_FORWARDER` | ERC-2771 forwarder for gasless claims; omit for recipient-pays |
 
-### Deploy
+## Walkthrough
 
-```bash
-npm run deploy:local       # Anvil (uses a well-known local test key)
-npm run deploy:sepolia     # Ethereum Sepolia
-npm run deploy:fuji        # Avalanche Fuji
-npm run deploy:testnet     # generic testnet via $TESTNET_RPC
-```
-
-## Usage Walkthrough
-
-### Proportional distribution (typical)
+Paying a run of two people, in claim mode, with a 30-day window:
 
 ```solidity
-// 1. Create a distribution: snapshot at block 1_000_000, payouts in USDC.
-uint256 id = payouts.createDistribution(1_000_000, usdcAddress);
-// (Pass address(0) as the token to pay out in ETH.)
-
-// 2. Set investor snapshot balances and their chosen payout methods.
-address[] memory investors = [alice, bob, charlie];
-uint256[] memory balances  = [uint256(1000e18), 2000e18, 3000e18];
-PayoutsContract.PayoutMethod[] memory methods = [
-    PayoutsContract.PayoutMethod.Claim,      // Alice pulls
-    PayoutsContract.PayoutMethod.Automatic,  // Bob is pushed on-chain
-    PayoutsContract.PayoutMethod.Bank        // Charlie is paid off-chain
-];
-payouts.setInvestorBalances(id, investors, balances, methods);
-
-// 3. Set the full intended distribution amount (Claim + Automatic + Bank).
-payouts.setDistributionTotalAmount(id, 6000e6); // e.g. 6000 USDC
-
-// 4. Compute per-investor amounts (batched), then finalize into Payout.
-payouts.startCompute(id);
-payouts.computePayoutAmounts(id, investors);   // up to 200 per call
-payouts.finalizeCompute(id);
-
-// 5. Fund ONLY the on-chain portion (Claim + Automatic; excludes Bank).
-uint256 required = payouts.getRequiredFundingAmount(id); // O(1), excludes Bank
-usdc.approve(address(payouts), required);
-payouts.fundPayoutToken(id, required);
-// For ETH distributions: payouts.fundPayoutToken{value: required}(id, required);
-
-// 6. Process payouts.
-payouts.claimPayout(id);                         // called by Alice
-payouts.batchDistributeAutomatic(id, [bob]);     // admin pushes to Bob
-payouts.markPayoutAsPaid(id, charlie);           // admin marks Charlie paid off-chain
-
-// 7. Close the distribution.
-payouts.finalizeDistribution(id);
-```
-
-### Manual distribution (exact amounts)
-
-```solidity
-// 1. Create in Manual mode.
+// 1. OPERATOR opens a distribution for this run.
 uint256 id = payouts.createDistribution(
-    1_000_000, usdcAddress, PayoutsContract.DistributionMode.Manual
+    address(usdc),                       // the asset
+    PayoutsContract.PayoutMode.Claim,    // recipients collect
+    uint64(block.timestamp + 30 days),   // expiry (0 = never)
+    runRef,                              // the payout run's id
+    address(0)                           // eligibility gate (see Compliance)
 );
 
-// 2. Set balances/methods (balances still gate eligibility & method categories).
-payouts.setInvestorBalances(id, investors, balances, methods);
+// 2. OPERATOR writes the statements. Repeat in batches of up to 200.
+payouts.setPayoutAmounts(id, [alice, bob], [100e6, 50e6]);
 
-// 3. Set exact per-investor payout amounts (no proportional computation).
-payouts.setManualPayoutAmounts(id, investors, exactAmounts);
+// 3. FUNDER puts the money in. May be split over several transactions.
+usdc.approve(address(payouts), 150e6);
+payouts.fundPayoutToken(id, 150e6);
+// payouts.remainingFunding(id) == 0
 
-// 4. Advance to Payout (computePayoutAmounts is NOT used in Manual mode).
-payouts.startCompute(id);
-payouts.finalizeCompute(id);
+// 4. Four eyes take it live: refuses unless every entry is covered, and the
+//    approval binds the run's exact content — edit it, and it must be re-seen.
+payouts.proposeFinalizeDistribution(id);   // OPERATOR
+payouts.approveFinalizeDistribution(id);   // APPROVER (a different person)
 
-// 5. Fund the on-chain portion, then process payouts as above.
-//    In Manual mode, compute required funding off-chain from the per-investor
-//    amounts of Claim + Automatic investors (getRequiredFundingAmount reverts
-//    in Manual mode).
+// 5a. Recipients collect (Claim mode).
+payouts.claimPayout(id);                   // called by alice
 
-// 6. payouts.finalizeDistribution(id);
+// 5b. Or the OPERATOR sends (Auto mode) — any subset.
+payouts.batchDistributeAutomatic(id, [alice, bob]);
+
+// 5c. Or record a payment made elsewhere, moving nothing here.
+payouts.markPayoutAsPaid(id, carol);
+
+// 6. Close it: either everything settled...
+payouts.closeDistribution(id);
+// ...or, once the window has passed, four eyes return what nobody collected.
+payouts.proposeSweepUnclaimed(id, treasury);   // OPERATOR
+payouts.approveSweepUnclaimed(id, treasury);   // APPROVER
 ```
 
-## Payout Calculation
+## Who pays the gas
 
-In **Proportional** mode, each investor's amount is their share of the snapshot
-applied to the full intended distribution amount:
+| `trustedForwarder` | Claiming |
+|---|---|
+| `address(0)` (default) | The recipient signs and pays their own gas |
+| An ERC-2771 forwarder | A relayer submits and pays; the recipient still receives |
 
-```
-payoutAmount = (investorSnapshotBalance * totalDistributionAmount) / totalSnapshotBalance
-```
+Set it at initialize, or later via the four-eyes pair
+`proposeSetTrustedForwarder` / `approveSetTrustedForwarder`. Because it lives
+in storage rather than an immutable, one implementation serves both choices and
+a tenant can change their mind without redeploying.
 
-Integer division truncates, so the sum of per-investor amounts never exceeds
-`totalDistributionAmount`. `getRequiredFundingAmount` returns the aggregate for
-`Claim + Automatic` investors only — `Bank` investors are paid off-chain and are
-never funded on-chain.
+> ⚠️ A trusted forwarder can act as **any** recipient — that is what makes
+> relaying work. Point it only at a forwarder that verifies signatures, such as
+> OpenZeppelin's `ERC2771Forwarder`.
 
-**Example** — total snapshot 6000 tokens, total distribution 6000 USDC:
+Claiming costs the claimer gas, so a payout can in principle be worth less than
+collecting it. Integrators should warn on dust rather than let someone spend
+more than they receive.
 
-| Investor | Snapshot | Method | On-chain payout |
-| -------- | -------- | ------ | --------------- |
-| Alice    | 1000     | Claim     | 1000 USDC |
-| Bob      | 2000     | Automatic | 2000 USDC |
-| Charlie  | 3000     | Bank      | 3000 USDC (off-chain) |
+## Roles
 
-Required on-chain funding here is **3000 USDC** (Alice + Bob only).
+Duties are split so that no single key can invent a payout, fund it, and take
+it live. One address may hold several roles, but each function demands exactly
+the role whose job it is — and the four-eyes actions demand a second person
+besides.
 
-## Roles & Access Control
+| Role | Job | What it can do |
+|---|---|---|
+| `OPERATOR_ROLE` | Day-to-day | Create distributions, write amounts, push payments, record receipts, close; **propose** finalize and sweep |
+| `FUNDER_ROLE` | Treasury | `fundPayoutToken` — the only way money comes in |
+| `ADMIN_ROLE` | Guardian | `pause`/`unpause`; **propose** withdraw and forwarder changes; cancel proposals |
+| `APPROVER_ROLE` | Second pair of eyes | **Approve** any proposal — never their own |
+| `DEFAULT_ADMIN_ROLE` | Root | Schedule/grant/revoke roles. Still the most powerful key — put it on a multisig behind a timelock |
+| ProxyAdmin owner | Upgrade authority | Upgrade the implementation — **outside** the role system; the deploy script can put it behind a `TimelockController` |
 
-| Role | Capabilities |
-| ---- | ------------ |
-| `DEFAULT_ADMIN_ROLE` | Root role admin — grants and revokes all roles. |
-| `ADMIN_ROLE` | Manage distribution amounts, compute/finalize, fund, batch payouts, whitelist requirement, pause/unpause, emergency withdraw. |
-| `SNAPSHOT_ROLE` | Create distributions and set investor balances/methods. |
-| `WHITELIST_ROLE` | Add/remove addresses from the whitelist. |
+`initialize(admin, approver, forwarder)` refuses `approver == admin`: the
+four-eyes split exists from the first block, not from a policy document.
+Recipients need no role: being written into a distribution is the entitlement.
 
-> **Upgrade authority is not a role.** Contract upgrades are controlled by the
-> **ProxyAdmin owner** set at deployment, independently of the roles above.
+**The four-eyes actions** — each is `proposeX` (by its owning role) then
+`approveX` (by an approver who is not the proposer). Proposals lapse after
+`PROPOSAL_TTL` (7 days), bind their exact parameters, and finalization binds
+the run's exact content — edit the run after proposing and the pending approval
+dies with the edit. Every step is evented (`ActionProposed` / `ActionApproved`
+/ `ActionCancelled`).
 
-All four roles are granted to the `_admin` address at initialization. For
-production, split them across dedicated operational and treasury accounts and
-place `ADMIN_ROLE` / the ProxyAdmin owner behind a multisig and/or timelock.
+**Granting a role waits; revoking does not.** A grant must be announced with
+`scheduleRoleGrant` and only takes effect after `ROLE_GRANT_DELAY` (2 days).
+That closes the obvious way around four eyes: without it, the root key could
+grant `APPROVER_ROLE` to a second address it controls and approve its own
+proposal in the next call — two signatures, one person. Revocation stays
+immediate, because a compromised key has to be removable *now*. Either the
+role's admin or the guardian (`ADMIN_ROLE`) can cancel a pending grant, so the
+veto does not need the key that scheduled it, and an unused announcement lapses
+rather than lingering.
 
-## API Reference
+> The root key still ultimately controls the role graph — the delay buys the
+> time to notice and react, and the timelocked upgrade path is the backstop if
+> the root itself is the problem. Custody of that key remains the foundation.
 
-### Distribution management
-- `createDistribution(uint256 blockNumber, address payoutToken) → uint256` — Proportional mode. *(SNAPSHOT_ROLE)*
-- `createDistribution(uint256 blockNumber, address payoutToken, DistributionMode mode) → uint256` *(SNAPSHOT_ROLE)*
+## API reference
 
-### Snapshot configuration *(state: Setup)*
-- `setInvestorBalances(uint256 id, address[] investors, uint256[] balances, PayoutMethod[] methods)` *(SNAPSHOT_ROLE)*
-- `setInvestorBalance(uint256 id, address investor, uint256 balance, PayoutMethod method)` *(SNAPSHOT_ROLE)*
+**Setup**
 
-### Amounts & funding
-- `setDistributionTotalAmount(uint256 id, uint256 amount)` — Proportional only, set once, state Setup. *(ADMIN_ROLE)*
-- `setManualPayoutAmounts(uint256 id, address[] investors, uint256[] amounts)` — Manual only, state Setup. *(ADMIN_ROLE)*
-- `getRequiredFundingAmount(uint256 id) → uint256` — view, Proportional only (reverts in Manual mode).
-- `fundPayoutToken(uint256 id, uint256 amount)` — payable; state Payout. *(ADMIN_ROLE)*
+| Function | Notes |
+|---|---|
+| `createDistribution(address payoutToken, PayoutMode mode, EntryMode entryMode, uint64 expiry, bytes32 runRef, address eligibilityRegistry)` | OPERATOR. `payoutToken = address(0)` for native; `expiry = 0` never expires; `Auto`+`Merkle` refused |
+| `setPayoutAmounts(uint256 id, address[] recipients, uint256[] amounts)` | OPERATOR, **Direct only**. Setup, ≤ 200 per call. Writing the same recipient twice reverts |
+| `proposeSetMerkleRoot(id, root, declaredTotal, recipientCount)` → `approveSetMerkleRoot(...)` | OPERATOR + APPROVER, **Merkle only**. Setup, before funding. Binds all three values |
+| `fundPayoutToken(uint256 id, uint256 amount)` | FUNDER. `payable` for native. Refuses to exceed `totalOwed` |
+| `proposeFinalizeDistribution(id)` → `approveFinalizeDistribution(id)` | OPERATOR proposes, APPROVER approves. Requires `funded == totalOwed`; binds the run's content |
 
-### Compute pipeline
-- `startCompute(uint256 id)` — Setup → Compute. *(ADMIN_ROLE)*
-- `computePayoutAmounts(uint256 id, address[] investors)` — Proportional only, state Compute. *(ADMIN_ROLE)*
-- `finalizeCompute(uint256 id)` — Compute → Payout. *(ADMIN_ROLE)*
-- `finalizeDistribution(uint256 id)` — Payout → Done. *(ADMIN_ROLE)*
+**Paying**
 
-### Payouts *(state: Payout)*
-- `claimPayout(uint256 id)` — investor pulls their Claim payout. *(public, nonReentrant)*
-- `batchDistributeAutomatic(uint256 id, address[] investors)` — push to Automatic investors. *(ADMIN_ROLE, nonReentrant)*
-- `markPayoutAsPaid(uint256 id, address investor)` — mark a Bank investor paid off-chain. *(ADMIN_ROLE)*
-- `batchMarkPayoutAsPaid(uint256 id, address[] investors)` *(ADMIN_ROLE)*
+| Function | Notes |
+|---|---|
+| `claimPayout(uint256 id)` | Recipient, **Direct only**. `Claim` mode, before expiry, gate-checked. ERC-2771 aware |
+| `claimPayout(uint256 id, uint256 amount, bytes32[] proof)` | Recipient, **Merkle only**. Same checks, plus proof verification |
+| `claimWithCode(id, amount, receiver, proof, signature)` | Anyone, **Code only**. The signature names the receiver; the code is spent once |
+| `batchDistributeAutomatic(uint256 id, address[] recipients)` | OPERATOR. `Auto` mode, any subset. Skips already-settled, reverts for strangers and the ineligible |
+| `markPayoutAsPaid(id, recipient)` / `batchMarkPayoutAsPaid` | OPERATOR, **Direct only**. Off-chain receipt; releases that share from the reserve; ungated |
+| `markPayoutAsPaid(id, recipient, amount, proof)` | OPERATOR, **Merkle only**. Same, proven. Single recipient — at merkle scale this is the exception, not bulk work |
+| `proposeSweepUnclaimed(id, to)` → `approveSweepUnclaimed(id, to)` | OPERATOR + APPROVER. After expiry only; returns the remainder and closes the run |
+| `closeDistribution(uint256 id)` | OPERATOR. Requires nothing left reserved |
 
-### Whitelist
-- `updateWhitelistRequirement(bool requireWhitelist)` *(ADMIN_ROLE)*
-- `addToWhitelist(address)` / `removeFromWhitelist(address)` *(WHITELIST_ROLE)*
-- `batchAddToWhitelist(address[])` / `batchRemoveFromWhitelist(address[])` *(WHITELIST_ROLE)*
+**Guarding**
 
-### Emergency & lifecycle
-- `emergencyWithdraw(address token, address to, uint256 amount)` — withdraw any token/ETH held by the contract. *(ADMIN_ROLE)*
-- `pause()` / `unpause()` *(ADMIN_ROLE)*
+`proposeSetTrustedForwarder(addr)` → `approveSetTrustedForwarder(addr)` (ADMIN + APPROVER) ·
+`proposeEmergencyWithdraw(token, to, amount)` → `approveEmergencyWithdraw(...)` (ADMIN + APPROVER, surplus only) ·
+`cancelProposal(bytes32)` (proposer or ADMIN) · `pause()` / `unpause()` (ADMIN)
 
-### Views
-- `getDistribution(uint256 id) → Distribution` — full distribution struct.
-- `getPayoutAmount(uint256 id, address investor) → uint256`
-- `getInvestorCount(uint256 id) → uint256`
-- `canClaimPayout(uint256 id, address investor) → (bool canClaim, uint256 payoutAmount)`
-- Public mappings/vars: `distributions`, `snapshotBalances`, `isInvestor`, `payoutPreferences`, `paidOut`, `payoutAmounts`, `whitelist`, `requireWhitelist`, `baseToken`, `nextDistributionId`, and the role/`MAX_BATCH_SIZE` constants.
+**Roles**
+
+`scheduleRoleGrant(role, account)` → `grantRole(role, account)` after `ROLE_GRANT_DELAY` (role admin) ·
+`cancelRoleGrant(role, account)` (role admin or ADMIN) · `revokeRole(role, account)` — immediate ·
+`roleGrantWindow(role, account)` · `roleGrantId(role, account)`
+
+**Views**
+
+`getDistribution(id)` · `getPayoutAmount(id, recipient)` (0 in Merkle mode — nothing is stored per recipient) · `canClaimPayout(id, recipient)` · `canClaimPayout(id, recipient, amount, proof)` · `verifyEntry(id, recipient, amount, proof)` · `remainingFunding(id)` · `getRecipientCount(id)` · `payoutAmounts(id, recipient)` · `paidOut(id, recipient)` · `reservedByToken(token)` · `proposals(bytes32)` · `finalizeProposalId(id)` · `merkleRootProposalId(id, root, total, count)` · `sweepProposalId(id, to)` · `withdrawProposalId(token, to, amount)` · `forwarderProposalId(addr)` · `trustedForwarder()` · `isTrustedForwarder(address)`
+
+**Events**
+
+`DistributionCreated` · `PayoutAmountsSet` · `MerkleRootSet` · `PayoutTokenFunded` · `DistributionStateAdvanced` · `PayoutClaimed` (recipient collected) · `PayoutSent` (operator pushed) · `CodeRedeemed` (a giveaway code was spent) · `PayoutMarkedAsPaid` (settled elsewhere) · `UnclaimedSwept` · `ActionProposed` · `ActionApproved` · `ActionCancelled` · `TrustedForwarderUpdated` · `EmergencyWithdrawal`
 
 ## Upgradeability
 
-- The **proxy address is stable** — always interact with it, not the implementation.
-- **Upgrades** are performed by the ProxyAdmin owner using OpenZeppelin's upgrade tooling.
-- **Storage layout is append-only.** Never reorder, remove, or retype existing
-  state variables; the CI suite runs OpenZeppelin's upgrade-safety validation.
+Deployed behind an OpenZeppelin **transparent proxy**:
+
+- **Implementation** — the logic (`src/PayoutsContract.sol`).
+- **Proxy** — holds state, delegates to the implementation; the address everyone
+  interacts with.
+- **ProxyAdmin** — controls upgrades. Its **owner** is the sole upgrade
+  authority and is distinct from `ADMIN_ROLE`.
+
+Reentrancy protection uses `ReentrancyGuardTransient`, whose guard lives in a
+fixed EIP-1153 transient slot and holds **zero** persistent storage — it can
+never collide with or shift contract storage across an upgrade.
 
 ## Security
 
-- Checks-effects-interactions ordering on every fund-moving path; `paidOut` set before transfer.
-- `nonReentrant` (OpenZeppelin `ReentrancyGuardTransient`, EIP-1153) on `claimPayout` and `batchDistributeAutomatic`; requires a Cancun-capable chain.
-- `SafeERC20` for all token transfers; explicit `msg.value` handling for ETH.
-- Role-based access control and pausability.
-- Optional whitelist enforced across **all** payout methods.
+Read [`SECURITY.md`](SECURITY.md) before deploying: it states the trust
+assumptions, the blast radius of a tenant-wide contract and what bounds it, the
+forwarder warning, and how to report a vulnerability.
 
-**Trust assumptions and known operational risks** (privileged roles,
-`emergencyWithdraw` scope, off-chain snapshot correctness, unsupported
-fee-on-transfer tokens) are documented in [`SECURITY.md`](SECURITY.md). Report
-vulnerabilities privately per that policy.
+The contract is **unaudited**.
 
 ## Testing
 
 ```bash
-forge clean && forge test        # full suite (clean build required)
-npm run test:gas                 # with gas report
-npm run test:verbose             # verbose traces
+npm test                # full suite (clean build first)
+npm run test:quick      # fast feedback, unoptimised, fewer fuzz runs
+npm run test:invariant  # stateful invariants only
+npm run test:gas        # gas report
+npm run coverage        # coverage summary
 ```
 
-> The OpenZeppelin upgrade-safety validator requires a full compilation. If you
-> see "Build info file … is not from a full compilation", run `forge clean`
-> first. CI already performs a clean build.
+Suites map one-to-one onto behaviour:
+
+| File | Covers |
+|---|---|
+| `test/Lifecycle.t.sol` | States and transitions, initialization, pausing, and that v1's removed surface is really gone |
+| `test/Amounts.t.sol` | Writing entries, duplicates, batch limits, `totalOwed` (incl. fuzz) |
+| `test/Funding.t.sol` | Over/under-funding, the finalize gate, native vs ERC-20 (incl. fuzz) |
+| `test/Payment.t.sol` | Claim, push, off-chain receipt, and the double-payment race between them |
+| `test/Reserve.t.sol` | Expiry, sweeping, surplus vs reserved — plus **stateful invariants** |
+| `test/Governance.t.sol` | Role granularity (operator ≠ funder ≠ guardian) and four-eyes: self-approval blocked, TTL lapse, content binding, one-shot approvals, cancelling |
+| `test/Compliance.t.sol` | All three gate postures, revocation at claim time, failing closed, the ERC-3643 adapter following a registry swap |
+| `test/Merkle.t.sol` | Committing a list in one transaction, forged and borrowed proofs, the **second-preimage attack**, the declared-total trade-off, both modes coexisting |
+| `test/Code.t.sol` | Giveaways: prefunding with nobody named, **front-running resistance**, one-shot codes, cross-distribution replay, gated campaigns, sweeping the unredeemed budget |
+| `test/Forwarder.t.sol` | ERC-2771: relayed claims, untrusted and revoked forwarders, role checks, four-eyes on the forwarder change |
 
 ## Documentation
 
-Auto-generated API docs from NatSpec:
-
 ```bash
-npm run docgen         # writes to docs/
-npm run docgen:serve   # build and serve locally
+npm run docgen          # generate into docs/
+npm run docgen:serve    # generate and serve
 ```
 
 ## Contributing
 
-Contributions are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup,
-coding standards, and the PR process.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
-Released under the [MIT License](LICENSE).
+MIT — see [`LICENSE`](LICENSE).
